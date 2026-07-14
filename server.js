@@ -100,10 +100,11 @@ if (fs.existsSync(DB_FILE)) {
    ADMIN_PASSWORD env vars; otherwise these safe defaults are used. Your existing
    local db.json already has your admin account, so local login is unaffected. */
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "info.dipendraupadhayay.2005@gmail.com";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin123";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "upadhayaydipendra621@@";
 
 function ensureAdmin() {
-  if (!db.users.find(u => u.email === ADMIN_EMAIL)) {
+  let admin = db.users.find(u => u.email === ADMIN_EMAIL);
+  if (!admin) {
     db.users.push({
       id: uid(),
       name: "Dipendra Upadhayay",
@@ -112,6 +113,10 @@ function ensureAdmin() {
       role: "admin",
       access: ["admin", "reception", "kitchen"]
     });
+  } else {
+    admin.passwordHash = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+    admin.role = "admin";
+    admin.access = ["admin", "reception", "kitchen"];
   }
 }
 
