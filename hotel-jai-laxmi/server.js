@@ -1071,31 +1071,30 @@ io.on("connection", socket => {
   socket.emit("hello", { time: new Date().toISOString() });
 });
 
-/* ── GoDaddy / cPanel Node.js hosting requires:
-   1. Bind on 0.0.0.0 (not 127.0.0.1)
-   2. Use process.env.PORT assigned by the host
-   3. Never hard-code port 5173 (that is Vite dev-server only) ── */
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+/* ── Start server ── */
+const PORT = process.env.PORT;
+if (!PORT) {
+  console.error("  ✖ process.env.PORT is not set. Exiting.");
+  process.exit(1);
+}
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, () => {
   console.log("");
   console.log("  ✦ होटल जय लक्ष्मी & लज — Hotel Jai Laxmi and Lodge ✦");
-  console.log("  Server running →  http://" + HOST + ":" + PORT);
+  console.log("  Server running on port " + PORT);
   console.log("  Admin login    →  " + ADMIN_EMAIL);
   console.log("");
 });
 
 server.on("error", (err) => {
   if (err.code === "EACCES") {
-    console.error("\n  ✖ Port " + PORT + " requires elevated privileges.");
-    console.error("    Set a different PORT in your .env file (e.g. PORT=3000).");
+    console.error("  ✖ Port " + PORT + " requires elevated privileges.");
     process.exit(1);
   } else if (err.code === "EADDRINUSE") {
-    console.error("\n  ✖ Port " + PORT + " is already in use.");
-    console.error("    Stop the other process or change PORT in your .env file.");
+    console.error("  ✖ Port " + PORT + " is already in use.");
     process.exit(1);
   } else {
     throw err;
   }
 });
+
