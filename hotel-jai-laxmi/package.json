@@ -1,0 +1,17 @@
+{
+  "name": "hotel-jai-laxmi-lodge",
+  "version": "1.0.0",
+  "description": "होटल जय लक्ष्मी & लज - Hotel Jai Laxmi and Lodge management system",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "author": "Dipendra Upadhayay (Rajbaar)",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "jsonwebtoken": "^9.0.2",
+    "bcryptjs": "^2.4.3"
+  }
+}

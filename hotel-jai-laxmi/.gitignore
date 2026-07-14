@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# live database — contains your JWT secret, eSewa secret key and password
+# hashes, so it must NEVER be committed to a public repo. The server creates a
+# fresh db.json automatically on first run.
+db.json
+
+# environment secrets
+.env
+.env.local
+
+# logs & OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
