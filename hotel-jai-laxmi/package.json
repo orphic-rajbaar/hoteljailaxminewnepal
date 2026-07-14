@@ -4,7 +4,11 @@
   "description": "होटल जय लक्ष्मी & लज - Hotel Jai Laxmi and Lodge management system",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "author": "Dipendra Upadhayay (Rajbaar)",
   "license": "MIT",
