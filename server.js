@@ -44,7 +44,8 @@ function freshDB() {
     transactions: [], // income & expense records
     credits: [],
     payment: { accountName: "", accountNumber: "", apiKey: "", bankName: "",
-      esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true },
+      esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true,
+      razorpayKeyId: "", razorpayKeySecret: "", razorpayEnabled: false, razorpayCurrency: "INR" },
     branding: { logo: "", favicon: "" },
     content: defaultContent(),
     payments: [],   // eSewa & other payment transactions
@@ -98,6 +99,10 @@ if (fs.existsSync(DB_FILE)) {
   if (db.payment.esewaProductCode === undefined) db.payment.esewaProductCode = "EPAYTEST";
   if (db.payment.esewaSecret === undefined) db.payment.esewaSecret = "8gBm/:&EnhH.1/q(";
   if (db.payment.esewaEnabled === undefined) db.payment.esewaEnabled = true;
+  if (db.payment.razorpayKeyId === undefined) db.payment.razorpayKeyId = "";
+  if (db.payment.razorpayKeySecret === undefined) db.payment.razorpayKeySecret = "";
+  if (db.payment.razorpayEnabled === undefined) db.payment.razorpayEnabled = false;
+  if (db.payment.razorpayCurrency === undefined) db.payment.razorpayCurrency = "INR";
   ensureContentShape();
 } else {
   db = freshDB();
@@ -339,16 +344,18 @@ app.post("/api/public/esewa/initiate", (req, res) => {
 
 function finalizePayment(payment, data) {
   const pend = payment.pending || {};
+  const method = payment.method || "esewa";
+  const label = method === "razorpay" ? "Razorpay" : "eSewa";
   if (pend.booking && pend.booking.roomId) {
     const room = db.rooms.find(r => r.id === pend.booking.roomId);
     if (room && !room.booked) {
-      const bk = buildBooking(room, { ...pend.booking, name: pend.name, phone: pend.phone, paymentMethod: "esewa" }, "online");
+      const bk = buildBooking(room, { ...pend.booking, name: pend.name, phone: pend.phone, paymentMethod: method }, "online");
       payment.bookingId = bk.id;
-      notify("booking", "🛏️ New Room Booking (eSewa PAID)", `Room ${room.number} — ${bk.name} · रू ${bk.total} · PAID via eSewa`, bk);
+      notify("booking", `🛏️ New Room Booking (${label} PAID)`, `Room ${room.number} — ${bk.name} · रू ${bk.total} · PAID via ${label}`, bk);
     }
   }
   if (Array.isArray(pend.items) && pend.items.length) {
-    const od = createOrder({ items: pend.items, name: pend.name, phone: pend.phone, paymentMethod: "esewa", source: "online" });
+    const od = createOrder({ items: pend.items, name: pend.name, phone: pend.phone, paymentMethod: method, source: "online" });
     if (!od.error) payment.orderId = od.id;
   }
   payment.status = "success";
@@ -410,6 +417,93 @@ app.get("/api/public/payment/:id", (req, res) => {
     booking: p.bookingId ? db.bookings.find(b => b.id === p.bookingId) : null,
     order: p.orderId ? db.orders.find(o => o.id === p.orderId) : null
   });
+});
+
+/* ================= Razorpay Payment Gateway =================
+   Backend creates the order (amount computed here — never trusted from the
+   client), the browser opens Razorpay Checkout, then we verify the returned
+   signature with HMAC-SHA256 before confirming. Keys live in db.payment
+   (editable from the admin panel) with env fallback; the secret is NEVER sent
+   to the frontend and never logged. */
+function razorpayCfg() {
+  const p = db.payment || {};
+  return {
+    enabled: p.razorpayEnabled === true,
+    keyId: p.razorpayKeyId || process.env.RAZORPAY_KEY_ID || "",
+    keySecret: p.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET || "",
+    currency: p.razorpayCurrency || "INR"
+  };
+}
+const rzpRate = {}; // simple in-memory rate limit per IP
+function rzpAllow(req) {
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || (req.socket && req.socket.remoteAddress) || "x";
+  const now = Date.now();
+  rzpRate[ip] = (rzpRate[ip] || []).filter(t => now - t < 60000);
+  if (rzpRate[ip].length >= 12) return false;
+  rzpRate[ip].push(now); return true;
+}
+app.post("/api/public/razorpay/order", async (req, res) => {
+  if (!rzpAllow(req)) return res.status(429).json({ error: "Too many payment attempts — please wait a minute." });
+  const cfg = razorpayCfg();
+  if (!cfg.enabled || !cfg.keyId || !cfg.keySecret) return res.status(400).json({ error: "Card / UPI payment is not configured yet." });
+  const { booking, items, name, phone, email } = req.body || {};
+  if (!name || !phone) return res.status(400).json({ error: "Name and phone are required" });
+  const calc = computeAmount({ booking, items });
+  if (calc.error) return res.status(400).json(calc);
+  if (calc.total <= 0) return res.status(400).json({ error: "There is nothing to pay for" });
+  const amountMinor = Math.round(calc.total * 100);
+  const receipt = "HJL-" + Date.now() + "-" + uid().slice(0, 6);
+  try {
+    const r = await fetch("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(cfg.keyId + ":" + cfg.keySecret).toString("base64") },
+      body: JSON.stringify({ amount: amountMinor, currency: cfg.currency, receipt, notes: { customer: String(name).slice(0, 60), phone: String(phone).slice(0, 20) } })
+    });
+    const order = await r.json();
+    if (!r.ok || !order.id) return res.status(502).json({ error: (order.error && order.error.description) || "Could not create the payment order." });
+    const payment = {
+      id: uid(), invoiceNumber: nextInvoice(), transactionUuid: receipt,
+      kind: booking ? (items && items.length ? "mixed" : "room") : "restaurant",
+      method: "razorpay", status: "pending",
+      customerName: name, email: email || "", phone,
+      amount: calc.subtotal, tax: calc.tax, serviceCharge: calc.service, discount: calc.discount, totalAmount: calc.total,
+      razorpayOrderId: order.id, razorpayPaymentId: "", razorpaySignature: "", currency: cfg.currency,
+      bookingId: "", orderId: "", notes: "", remarks: "",
+      pending: { booking: booking || null, items: items || [], name, phone, email: email || "" },
+      audit: [{ at: new Date().toISOString(), by: "system", action: "razorpay order created " + order.id }],
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+    };
+    db.payments.push(payment); save(); changed("payments");
+    console.log("[razorpay] order", order.id, "amount(minor)", amountMinor); // secrets are never logged
+    res.json({ orderId: order.id, amount: amountMinor, currency: cfg.currency, keyId: cfg.keyId, paymentId: payment.id, name, email: email || "", phone });
+  } catch (e) {
+    console.log("[razorpay] order error");
+    res.status(502).json({ error: "Could not reach the payment gateway." });
+  }
+});
+app.post("/api/public/razorpay/verify", (req, res) => {
+  const cfg = razorpayCfg();
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature, paymentId } = req.body || {};
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) return res.status(400).json({ error: "Missing payment fields" });
+  const payment = db.payments.find(p => (paymentId && p.id === paymentId) || p.razorpayOrderId === razorpay_order_id);
+  if (!payment) return res.status(404).json({ error: "Payment not found" });
+  if (db.payments.some(p => p.razorpayPaymentId === razorpay_payment_id && p.status === "success"))
+    return res.status(409).json({ error: "This payment has already been processed." });
+  const expected = crypto.createHmac("sha256", cfg.keySecret).update(razorpay_order_id + "|" + razorpay_payment_id).digest("hex");
+  const ok = expected === razorpay_signature;
+  payment.razorpayPaymentId = razorpay_payment_id;
+  payment.razorpaySignature = razorpay_signature;
+  payment.audit.push({ at: new Date().toISOString(), by: "system", action: "razorpay verify " + (ok ? "PASS" : "FAIL") + " · " + razorpay_payment_id });
+  if (!ok) {
+    if (payment.status === "pending") { payment.status = "failed"; payment.updatedAt = new Date().toISOString(); }
+    save(); changed("payments");
+    console.log("[razorpay] signature FAILED", razorpay_payment_id);
+    return res.status(400).json({ error: "Payment signature verification failed." });
+  }
+  if (payment.status !== "success") finalizePayment(payment, { transaction_code: razorpay_payment_id });
+  save(); changed("payments");
+  console.log("[razorpay] verified", razorpay_payment_id);
+  res.json({ ok: true, paymentId: payment.id });
 });
 
 /* ---------------- Admin: Payment management ---------------- */
@@ -513,7 +607,7 @@ function buildBooking(room, body, source) {
   const discount = Math.max(0, Math.min(gross, Number(body.discount) || 0));
   const total = gross - discount;
   let paidAmount = Math.max(0, Math.min(total, Number(body.paidAmount) || 0));
-  if ((body.paymentMethod === "online" || body.paymentMethod === "esewa") && source === "online") paidAmount = total;
+  if ((body.paymentMethod === "online" || body.paymentMethod === "esewa" || body.paymentMethod === "razorpay") && source === "online") paidAmount = total;
   if (body.paid === true) paidAmount = total;
   db.counters.booking++;
   const booking = {
@@ -578,7 +672,7 @@ function createOrder({ items, name, phone, table, tableId, paymentMethod, source
     table: table || (tbl ? tbl.number : ""), tableId: tableId || "",
     paymentMethod: paymentMethod || "cash",
     /* dine-in table orders stay unpaid until the table bill is settled */
-    paid: tableId ? false : (paymentMethod === "online" || paymentMethod === "esewa" || source === "pos"),
+    paid: tableId ? false : (paymentMethod === "online" || paymentMethod === "esewa" || paymentMethod === "razorpay" || source === "pos"),
     status: "pending", // pending -> received -> making -> ready -> completed
     source: source || "pos", byUser: byUser || "",
     createdAt: new Date().toISOString()
@@ -877,7 +971,8 @@ app.get("/api/payment", auth("admin", "reception"), (req, res) => res.json(db.pa
 app.put("/api/payment", auth("admin"), (req, res) => {
   const b = req.body || {};
   ["accountName", "accountNumber", "apiKey", "bankName",
-    "esewaMode", "esewaProductCode", "esewaSecret", "esewaEnabled"].forEach(k => {
+    "esewaMode", "esewaProductCode", "esewaSecret", "esewaEnabled",
+    "razorpayKeyId", "razorpayKeySecret", "razorpayEnabled", "razorpayCurrency"].forEach(k => {
     if (b[k] !== undefined) db.payment[k] = b[k];
   });
   save(); changed("payment"); res.json(db.payment);

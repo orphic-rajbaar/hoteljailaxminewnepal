@@ -972,6 +972,33 @@ function PaymentTab() {
             : "🧪 TEST mode — at eSewa's page use the test eSewa ID and token 123456. No real money moves."}
         </p>
       </div>
+
+      <div className="card" style={{ marginTop: 18 }}>
+        <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+          <h4 className="gold" style={{ margin: 0 }}>💳 Razorpay — Card / UPI / Netbanking</h4>
+          <span className={"pill " + (p.razorpayEnabled ? "p-ready" : "p-cancelled")}>{p.razorpayEnabled ? "Enabled" : "Disabled"}</span>
+        </div>
+        <p className="muted" style={{ marginTop: -4 }}>Accept cards, UPI & netbanking via Razorpay. Get your Key ID and Key Secret from the Razorpay Dashboard → Settings → API Keys. The secret is stored on the server and never sent to customers.</p>
+        <div className="row mt">
+          <div><label>Show at checkout</label>
+            <select value={p.razorpayEnabled ? "yes" : "no"} onChange={e => setP({ ...p, razorpayEnabled: e.target.value === "yes" })}>
+              <option value="no">No — hidden</option>
+              <option value="yes">Yes — enabled</option>
+            </select>
+          </div>
+          <div><label>Currency</label>
+            <input value={p.razorpayCurrency || "INR"} onChange={e => setP({ ...p, razorpayCurrency: (e.target.value || "").toUpperCase() })} placeholder="INR" />
+          </div>
+        </div>
+        <label>Razorpay Key ID</label>
+        <input value={p.razorpayKeyId || ""} onChange={e => setP({ ...p, razorpayKeyId: e.target.value })} placeholder="rzp_test_xxxxx or rzp_live_xxxxx" />
+        <label>Razorpay Key Secret</label>
+        <input type="password" value={p.razorpayKeySecret || ""} onChange={e => setP({ ...p, razorpayKeySecret: e.target.value })} placeholder="Your Razorpay key secret" />
+        <p className="muted mt" style={{ fontSize: 12 }}>
+          {String(p.razorpayKeyId || "").startsWith("rzp_live") ? "⚠ LIVE keys — real money will be charged." : "🧪 Use rzp_test_ keys to test safely; rzp_live_ keys charge real money."}
+        </p>
+        <button className="btn mt" onClick={save}>{saved ? "✓ Saved!" : "Save Razorpay"}</button>
+      </div>
     </div>
   );
 }

@@ -2257,6 +2257,18 @@ function ContactPage() {
   );
 }
 
+/* load Razorpay Checkout only when needed */
+function loadRazorpay() {
+  return new Promise(resolve => {
+    if (window.Razorpay) return resolve(true);
+    const s = document.createElement("script");
+    s.src = "https://checkout.razorpay.com/v1/checkout.js";
+    s.onload = () => resolve(true);
+    s.onerror = () => resolve(false);
+    document.body.appendChild(s);
+  });
+}
+
 /* ---------------- CHECKOUT ---------------- */
 function CheckoutPage() {
   const [cart, setCart] = useCart();
@@ -2309,6 +2321,36 @@ function CheckoutPage() {
       });
       document.body.appendChild(form);
       form.submit(); // browser leaves for eSewa; cart is cleared on the success page
+    } catch (e) { setErr(e.message); setBusy(false); }
+  };
+
+  /* Razorpay: backend creates the order + computes the amount, we open Checkout,
+     then the backend verifies the signature before confirming the booking. */
+  const payRazorpay = async () => {
+    setErr("");
+    if (!f.name.trim() || !f.phone.trim()) { setErr("Please enter your name and phone number."); return; }
+    setBusy(true);
+    try {
+      const ready = await loadRazorpay();
+      if (!ready || !window.Razorpay) { setErr("Could not load the payment gateway — check your connection."); setBusy(false); return; }
+      const r = await api("/public/razorpay/order", { method: "POST", body: { booking: cart.booking, items: cart.items, name: f.name, phone: f.phone, email: (Auth.user || {}).email || "" } });
+      const rzp = new window.Razorpay({
+        key: r.keyId, amount: r.amount, currency: r.currency, order_id: r.orderId,
+        name: "Hotel Jai Laxmi and Lodge", description: "Room / restaurant payment",
+        image: Branding.logo || (location.origin + "/img/logo-small.jpg"),
+        prefill: { name: r.name, email: r.email, contact: r.phone },
+        theme: { color: "#d4af37" },
+        handler: async function (resp) {
+          try {
+            await api("/public/razorpay/verify", { method: "POST", body: { razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature, paymentId: r.paymentId } });
+            Cart.write({ items: [], booking: null });
+            go("/payment-success?pid=" + r.paymentId);
+          } catch (e2) { go("/payment-failed?pid=" + r.paymentId); }
+        },
+        modal: { ondismiss: function () { setBusy(false); } }
+      });
+      rzp.on("payment.failed", function () { setErr("Payment failed — please try again."); setBusy(false); });
+      rzp.open();
     } catch (e) { setErr(e.message); setBusy(false); }
   };
 
@@ -2406,6 +2448,9 @@ function CheckoutPage() {
             <div className={"pay-card" + (f.paymentMethod === "esewa" ? " on" : "")} onClick={() => setF({ ...f, paymentMethod: "esewa" })}>
               <span className="pic">🟢</span><b>eSewa</b><span>Secure online payment</span>
             </div>
+            <div className={"pay-card" + (f.paymentMethod === "razorpay" ? " on" : "")} onClick={() => setF({ ...f, paymentMethod: "razorpay" })}>
+              <span className="pic">💳</span><b>Card / UPI</b><span>Razorpay — cards, UPI, banking</span>
+            </div>
             <div className={"pay-card" + (f.paymentMethod === "cash" ? " on" : "")} onClick={() => setF({ ...f, paymentMethod: "cash" })}>
               <span className="pic">💵</span><b>Cash at Counter</b><span>Pay when you arrive</span>
             </div>
@@ -2417,6 +2462,12 @@ function CheckoutPage() {
             <div className="qr-box" style={{ textAlign: "center" }}>
               <p style={{ fontWeight: 600 }}>🔒 You'll be redirected to the official eSewa page to pay <b className="gold">{NPR(total)}</b> securely.</p>
               <p style={{ color: "#555", fontSize: 13 }}>The amount is calculated and verified by our server. Test login token: 123456</p>
+            </div>
+          )}
+          {f.paymentMethod === "razorpay" && (
+            <div className="qr-box" style={{ textAlign: "center" }}>
+              <p style={{ fontWeight: 600 }}>🔒 Pay <b className="gold">{NPR(total)}</b> securely by card, UPI or netbanking.</p>
+              <p style={{ color: "#555", fontSize: 13 }}>The amount is computed and the payment verified on our server before your booking is confirmed.</p>
             </div>
           )}
           {f.paymentMethod === "online" && (
@@ -2431,11 +2482,12 @@ function CheckoutPage() {
           )}
           {err && <p className="red mt">⚠ {err}</p>}
           <button className="btn lg mt" style={{ width: "100%" }} disabled={busy}
-            onClick={f.paymentMethod === "esewa" ? payEsewa : pay}>
+            onClick={f.paymentMethod === "esewa" ? payEsewa : f.paymentMethod === "razorpay" ? payRazorpay : pay}>
             {busy ? "Processing…"
               : f.paymentMethod === "esewa" ? "🟢 Pay Securely with eSewa →"
-                : f.paymentMethod === "online" ? "🙏 I Have Paid — Confirm Order"
-                  : "🙏 Confirm Order — Pay Cash"}
+                : f.paymentMethod === "razorpay" ? "💳 Pay with Card / UPI →"
+                  : f.paymentMethod === "online" ? "🙏 I Have Paid — Confirm Order"
+                    : "🙏 Confirm Order — Pay Cash"}
           </button>
         </div></div>
       </Reveal>
