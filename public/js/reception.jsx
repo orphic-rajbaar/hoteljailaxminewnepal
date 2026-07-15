@@ -8,6 +8,8 @@ function ReceptionPanel() {
     { id: "bookings", icon: "📒", label: "Bookings" },
     { id: "rooms", icon: "🏛", label: "Floors & Rooms" },
     { id: "pos", icon: "🧾", label: "POS Billing" },
+    { id: "store", icon: "🏪", label: "POS Store" },
+    { id: "tables", icon: "🍽️", label: "Dine-In Tables" },
     { id: "orders", icon: "🍽️", label: "Orders" },
     { id: "verify", icon: "✅", label: "Verify & Bill" },
     { id: "reservations", icon: "🪑", label: "Reservations" },
@@ -20,6 +22,8 @@ function ReceptionPanel() {
       {tab === "bookings" && <BookingsTable />}
       {tab === "rooms" && <FloorsRooms />}
       {tab === "pos" && <POS />}
+      {tab === "store" && <PosPanel embedded />}
+      {tab === "tables" && <TableService />}
       {tab === "orders" && <OrdersTable canBill />}
       {tab === "verify" && <PaymentVerify />}
       {tab === "reservations" && <ReservationsTable />}
@@ -59,13 +63,15 @@ function ReceptionBookModal({ room, onClose }) {
   const [f, setF] = useState({
     name: "", phone: "", address: "", persons: 1, idPhoto: "",
     checkIn: new Date().toISOString().slice(0, 10), checkOut: "",
-    paymentMethod: "cash", paidAmount: ""
+    paymentMethod: "cash", paidAmount: "", discount: ""
   });
   const [err, setErr] = useState("");
   const [done, setDone] = useState(null);
   const [qr, setQr] = useState(null);
   const nights = nightsCalc(f.checkIn, f.checkOut);
-  const total = nights * (Number(room.price) || 0);
+  const gross = nights * (Number(room.price) || 0);
+  const discount = Math.max(0, Math.min(gross, Number(f.discount) || 0));
+  const total = gross - discount;
   const paidAmt = Math.max(0, Math.min(total, Number(f.paidAmount) || 0));
   const pending = total - paidAmt;
   useEffect(() => {
@@ -113,9 +119,14 @@ function ReceptionBookModal({ room, onClose }) {
         <div><label>Check-in</label><input type="date" value={f.checkIn} onChange={e => setF({ ...f, checkIn: e.target.value })} /></div>
         <div><label>Check-out</label><input type="date" value={f.checkOut} min={f.checkIn} onChange={e => setF({ ...f, checkOut: e.target.value })} /></div>
       </div>
-      <div className="total-plate mt">
-        <span className="lab">{nights} night{nights > 1 ? "s" : ""} × {NPR(room.price)}</span>
-        <span className="amt">{NPR(total)}</span>
+      <div className="row">
+        <div><label>Discount (रू)</label><input type="number" min="0" value={f.discount} onChange={e => setF({ ...f, discount: e.target.value })} placeholder="0" /></div>
+        <div><label>&nbsp;</label>
+          <div className="total-plate" style={{ marginTop: 0, padding: "10px 14px" }}>
+            <span className="lab" style={{ fontSize: 12 }}>{nights}n × {NPR(room.price)}{discount > 0 ? " − " + NPR(discount) : ""}</span>
+            <span className="amt" style={{ fontSize: 18 }}>{NPR(total)}</span>
+          </div>
+        </div>
       </div>
       <label>Payment method</label>
       <div className="flex" style={{ flexWrap: "wrap" }}>

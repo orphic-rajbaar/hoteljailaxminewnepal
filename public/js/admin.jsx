@@ -20,9 +20,10 @@ function PanelShell({ area, title, tabs, tab, setTab, children }) {
           </button>
         ))}
         <div className="sep" />
-        {u.role === "admin" && area !== "admin" && <button onClick={() => go("/admin")}>👑 Admin Panel</button>}
+        {(u.role === "admin" || Auth.can("admin")) && area !== "admin" && <button onClick={() => go("/admin")}>👑 Admin Panel</button>}
         {Auth.can("reception") && area !== "reception" && <button onClick={() => go("/reception")}>🛎 Reception</button>}
         {Auth.can("kitchen") && area !== "kitchen" && <button onClick={() => go("/kitchen")}>👨‍🍳 Kitchen</button>}
+        {(u.role === "admin" || Auth.can("reception") || Auth.can("waiter")) && area !== "waiter" && <button onClick={() => go("/waiter")}>🛎️ Waiter</button>}
         {(u.role === "admin" || Auth.can("reception") || Auth.can("pos")) && <button onClick={() => go("/pos")}>🏪 POS Billing</button>}
         <button onClick={() => go("/")}>🌐 Public Site</button>
         <button onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>🚪 Logout ({u.name.split(" ")[0]})</button>
@@ -50,6 +51,7 @@ function AdminPanel() {
     { id: "rooms", icon: "🛏️", label: "Floors & Rooms" },
     { id: "restaurant", icon: "🍽️", label: "Restaurant Menu" },
     { id: "restpage", icon: "🎬", label: "Restaurant Page" },
+    { id: "tables", icon: "🍽️", label: "Tables" },
     { id: "offers", icon: "🎁", label: "Offers & Packages" },
     { id: "orders", icon: "🧾", label: "Orders" },
     { id: "bookings", icon: "📒", label: "Bookings" },
@@ -73,6 +75,7 @@ function AdminPanel() {
       {tab === "rooms" && <FloorsRooms />}
       {tab === "restaurant" && <AdminMenu />}
       {tab === "restpage" && <RestaurantContentTab />}
+      {tab === "tables" && <TablesAdmin />}
       {tab === "offers" && <ContentList section="offers" title="Offer / Package" heading="🎁 Offers & Packages" sub="Offers & packages shown on the public homepage — add, edit or delete anytime"
         cardTitle="heading" fields={[{ key: "heading", label: "Heading *", ph: "e.g. Weekend Family Package" }, { key: "desc", label: "Description", type: "textarea", ph: "What's included…" }, { key: "photo", label: "Photo", type: "photo" }]} />}
       {tab === "orders" && <OrdersTable canBill />}
@@ -784,8 +787,11 @@ function EmpModal({ init, onClose }) {
       <div className="flex">
         <button className={"btn sm " + (f.access.includes("kitchen") ? "" : "ghost")} onClick={() => toggle("kitchen")}>👨‍🍳 Kitchen Panel</button>
         <button className={"btn sm " + (f.access.includes("reception") ? "" : "ghost")} onClick={() => toggle("reception")}>🛎 Reception Panel</button>
+        <button className={"btn sm " + (f.access.includes("waiter") ? "" : "ghost")} onClick={() => toggle("waiter")}>🛎️ Waiter Panel</button>
         <button className={"btn sm " + (f.access.includes("pos") ? "" : "ghost")} onClick={() => toggle("pos")}>🏪 POS / Cashier</button>
+        <button className={"btn sm " + (f.access.includes("admin") ? "gold" : "ghost")} onClick={() => toggle("admin")}>👑 Sub-Admin (full access)</button>
       </div>
+      {f.access.includes("admin") && <p className="muted" style={{ fontSize: 12 }}>⚠ Sub-Admin can access every panel and do everything an admin can (except this is still logged separately).</p>}
       {f.access.length > 0 && (
         <div className="row">
           <div><label>Login email</label><input value={f.email} onChange={e => setF({ ...f, email: e.target.value })} /></div>
@@ -1621,9 +1627,16 @@ function PaymentVerify() {
   const methodLabel = m => ({ cash: "💵 Cash", online: "📱 QR/Online", esewa: "🟢 eSewa", qr: "📱 QR", credit: "💳 Credit", other: "🏦 Other" }[m] || m);
   const verify = async r => {
     if (r.isPaid) return;
-    if (!confirm("Verify payment received for " + r.ref + " (" + NPR(r.total) + ") and mark as PAID?")) return;
-    if (r.kind === "room") await api("/bookings/" + r.id, { method: "PATCH", body: { paid: true } });
-    else await api("/orders/" + r.id, { method: "PATCH", body: { paid: true } });
+    const isOnline = ["online", "esewa", "qr"].includes(r.method);
+    let txnId = "";
+    if (isOnline) {
+      txnId = prompt("Enter the " + r.method.toUpperCase() + " transaction ID for " + r.ref + " (" + NPR(r.total) + "):", "");
+      if (txnId === null) return; // cancelled
+    } else if (!confirm("Confirm cash received for " + r.ref + " (" + NPR(r.total) + ") and mark PAID?")) return;
+    const body = { paid: true, verifiedBy: (Auth.user || {}).name || "staff" };
+    if (txnId) body.txnId = txnId;
+    if (r.kind === "room") await api("/bookings/" + r.id, { method: "PATCH", body });
+    else await api("/orders/" + r.id, { method: "PATCH", body });
   };
   const printBill = r => r.kind === "room" ? printHTML(roomBillHTML(r.obj)) : printHTML(billHTML(r.obj, "customer"));
   const pendingCount = rows.filter(r => !r.isPaid).length;
@@ -1644,7 +1657,7 @@ function PaymentVerify() {
                 <td><b>{r.ref}</b></td>
                 <td>{r.kind === "room" ? "🛏 Room" : "🍽 Food"}</td>
                 <td>{r.name}{r.phone ? <span className="muted"> · {r.phone}</span> : null}</td>
-                <td>{methodLabel(r.method)}</td>
+                <td>{methodLabel(r.method)}{r.obj.txnId ? <div className="muted" style={{ fontSize: 11 }}>Txn: {r.obj.txnId}</div> : null}</td>
                 <td><b>{NPR(r.total)}</b></td>
                 <td>{r.isPaid ? <span className="pill p-ready">paid ✓</span> : <span className="pill p-cancelled">due {NPR(r.pending)}</span>}</td>
                 <td className="muted" style={{ fontSize: 11.5 }}>{fmtDT(r.when)}</td>

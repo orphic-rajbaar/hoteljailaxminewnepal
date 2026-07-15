@@ -374,6 +374,7 @@ function roomBillHTML(b) {
     <table>
     <tr><td>Rate / night</td><td class="r">रू ${b.price}</td></tr>
     <tr><td>Nights</td><td class="r">× ${nights}</td></tr>
+    ${b.discount ? `<tr><td>Subtotal</td><td class="r">रू ${b.gross !== undefined ? b.gross : nights * (Number(b.price) || 0)}</td></tr><tr><td>Discount</td><td class="r">- रू ${b.discount}</td></tr>` : ""}
     <tr><td class="tot">TOTAL</td><td class="r tot">रू ${total}</td></tr>
     <tr><td>Paid (${(b.paymentMethod || "cash").toUpperCase()})</td><td class="r">रू ${paidAmt}</td></tr>
     <tr><td class="tot">${pending > 0 ? "PENDING DUE" : "BALANCE"}</td><td class="r tot">रू ${pending}</td></tr>

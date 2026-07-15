@@ -51,6 +51,7 @@ function freshDB() {
     auditLog: [],   // deletions & sensitive admin actions
     posProducts: [], // private POS store: cigarettes, alcohol, beverages
     posSales: [],    // private POS store sales
+    tables: [],      // restaurant dine-in tables
     counters: { order: 0, booking: 0, bill: 0, invoice: 0, posSale: 0, posInvoice: 0 }
   };
 }
@@ -88,6 +89,7 @@ if (fs.existsSync(DB_FILE)) {
   db.auditLog = db.auditLog || [];
   db.posProducts = db.posProducts || [];
   db.posSales = db.posSales || [];
+  db.tables = db.tables || [];
   db.counters.invoice = db.counters.invoice || 0;
   db.counters.posSale = db.counters.posSale || 0;
   db.counters.posInvoice = db.counters.posInvoice || 0;
@@ -507,14 +509,16 @@ function buildBooking(room, body, source) {
   const checkIn = body.checkIn || new Date().toISOString().slice(0, 10);
   const checkOut = body.checkOut || "";
   const nights = nightsBetween(checkIn, checkOut);
-  const total = nights * (Number(room.price) || 0);
+  const gross = nights * (Number(room.price) || 0);
+  const discount = Math.max(0, Math.min(gross, Number(body.discount) || 0));
+  const total = gross - discount;
   let paidAmount = Math.max(0, Math.min(total, Number(body.paidAmount) || 0));
   if ((body.paymentMethod === "online" || body.paymentMethod === "esewa") && source === "online") paidAmount = total;
   if (body.paid === true) paidAmount = total;
   db.counters.booking++;
   const booking = {
     id: uid(), no: db.counters.booking, roomId: room.id, roomNumber: room.number,
-    roomType: room.type, price: room.price, nights, total,
+    roomType: room.type, price: room.price, nights, gross, discount, total,
     paidAmount, pendingAmount: total - paidAmount, paid: total - paidAmount <= 0,
     name: body.name, phone: body.phone,
     address: body.address || "", persons: Number(body.persons) || 1,
@@ -546,15 +550,15 @@ app.post("/api/public/bookings", (req, res) => {
 
 /* Public restaurant order */
 app.post("/api/public/orders", (req, res) => {
-  const { items, name, phone, table, paymentMethod } = req.body || {};
+  const { items, name, phone, table, tableId, paymentMethod } = req.body || {};
   if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "Cart is empty" });
   if (!name || !phone) return res.status(400).json({ error: "Name and phone are required" });
-  const order = createOrder({ items, name, phone, table, paymentMethod, source: "online" });
+  const order = createOrder({ items, name, phone, table, tableId, paymentMethod, source: "online" });
   if (order.error) return res.status(400).json(order);
   res.json(order);
 });
 
-function createOrder({ items, name, phone, table, paymentMethod, source, byUser }) {
+function createOrder({ items, name, phone, table, tableId, paymentMethod, source, byUser }) {
   const lines = [];
   let total = 0;
   for (const it of items) {
@@ -565,18 +569,26 @@ function createOrder({ items, name, phone, table, paymentMethod, source, byUser 
     total += qty * m.price;
   }
   if (!lines.length) return { error: "No valid items in order" };
+  const tbl = tableId ? db.tables.find(t => t.id === tableId) : null;
   db.counters.order++;
   db.counters.bill++;
   const order = {
     id: uid(), no: db.counters.order, billNo: db.counters.bill,
     items: lines, total, name: name || "Walk-in", phone: phone || "",
-    table: table || "", paymentMethod: paymentMethod || "cash",
-    paid: paymentMethod === "online" || paymentMethod === "esewa" || source === "pos",
+    table: table || (tbl ? tbl.number : ""), tableId: tableId || "",
+    paymentMethod: paymentMethod || "cash",
+    /* dine-in table orders stay unpaid until the table bill is settled */
+    paid: tableId ? false : (paymentMethod === "online" || paymentMethod === "esewa" || source === "pos"),
     status: "pending", // pending -> received -> making -> ready -> completed
     source: source || "pos", byUser: byUser || "",
     createdAt: new Date().toISOString()
   };
   db.orders.push(order);
+  if (tbl && tbl.status !== "occupied") {
+    tbl.status = "occupied"; tbl.seatedAt = tbl.seatedAt || new Date().toISOString();
+    if (name) tbl.currentName = name;
+    changed("tables");
+  }
   db.transactions.push({ id: uid(), kind: "income", category: "Restaurant",
     amount: total, note: `Order #${order.no} — ${order.name} (${order.paymentMethod})`,
     paid: order.paid, refId: order.id, date: new Date().toISOString() });
@@ -661,6 +673,8 @@ app.patch("/api/bookings/:id", auth("admin", "reception"), (req, res) => {
     b.paid = !!req.body.paid;
     if (b.paid) { b.paidAmount = b.total; b.pendingAmount = 0; }
   }
+  if (req.body.txnId !== undefined) b.txnId = req.body.txnId;
+  if (req.body.verifiedBy !== undefined) { b.verifiedBy = req.body.verifiedBy; b.verifiedAt = new Date().toISOString(); }
   const t = db.transactions.find(t => t.refId === b.id);
   if (t) t.paid = b.paid;
   save(); changed("bookings"); changed("rooms");
@@ -668,7 +682,7 @@ app.patch("/api/bookings/:id", auth("admin", "reception"), (req, res) => {
 });
 
 /* ---------------- Restaurant Menu ---------------- */
-app.get("/api/menu", auth("admin", "reception", "kitchen", "pos"), (req, res) => res.json(db.menu));
+app.get("/api/menu", auth("admin", "reception", "kitchen", "pos", "waiter"), (req, res) => res.json(db.menu));
 app.post("/api/menu", auth("admin"), (req, res) => {
   const { foodName, price, foodType, photo, category, desc, prepTime, spice, chefSpecial } = req.body || {};
   if (!foodName) return res.status(400).json({ error: "Food name required" });
@@ -701,32 +715,36 @@ app.delete("/api/menu/:id", auth("admin"), (req, res) => {
 });
 
 /* ---------------- Orders (kitchen + reception + admin) ---------------- */
-app.get("/api/orders", auth("admin", "reception", "kitchen"), (req, res) => res.json(db.orders.slice().reverse()));
+app.get("/api/orders", auth("admin", "reception", "kitchen", "waiter"), (req, res) => res.json(db.orders.slice().reverse()));
 app.post("/api/orders", auth("admin", "reception"), (req, res) => {
   const order = createOrder({ ...req.body, source: "pos", byUser: req.user.name });
   if (order.error) return res.status(400).json(order);
   res.json(order);
 });
-app.patch("/api/orders/:id", auth("admin", "reception", "kitchen"), (req, res) => {
+app.patch("/api/orders/:id", auth("admin", "reception", "kitchen", "waiter"), (req, res) => {
   const o = db.orders.find(x => x.id === req.params.id);
   if (!o) return res.status(404).json({ error: "Order not found" });
-  const allowed = ["pending", "received", "making", "ready", "completed", "cancelled"];
+  const allowed = ["pending", "received", "making", "ready", "served", "completed", "cancelled"];
   if (req.body.status && allowed.includes(req.body.status)) {
     o.status = req.body.status;
+    if (req.body.status === "served") { o.servedBy = req.user.name; o.servedAt = new Date().toISOString(); }
     const msgs = {
       received: `👨‍🍳 Kitchen received order #${o.no}`,
       making: `🔥 Order #${o.no} is being prepared`,
-      ready: `✅ Order #${o.no} is READY!`,
+      ready: `🛎️ Order #${o.no} READY — waiter please serve${o.table ? " (Table " + o.table + ")" : ""}`,
+      served: `🍽️ Order #${o.no} served${o.table ? " to Table " + o.table : ""}`,
       completed: `Order #${o.no} completed`,
       cancelled: `Order #${o.no} cancelled`
     };
-    if (msgs[o.status]) notify("order-status", "Order Update", msgs[o.status], o);
+    if (msgs[o.status]) notify(o.status === "ready" ? "order" : "order-status", "Order Update", msgs[o.status], o);
   }
   if (req.body.paid !== undefined) {
     o.paid = !!req.body.paid;
     const t = db.transactions.find(t => t.refId === o.id);
     if (t) t.paid = o.paid;
   }
+  if (req.body.txnId !== undefined) o.txnId = req.body.txnId;
+  if (req.body.verifiedBy !== undefined) { o.verifiedBy = req.body.verifiedBy; o.verifiedAt = new Date().toISOString(); }
   save(); changed("orders"); res.json(o);
 });
 
@@ -1230,6 +1248,54 @@ app.get("/api/pos/rooms", auth("admin", "reception", "pos"), (req, res) => {
     rooms.push({ roomId: b.roomId, roomNumber: b.roomNumber, guest: b.name, bookingNo: b.no });
   }
   res.json(rooms);
+});
+
+/* ================= Restaurant Table Management ================= */
+const TABLE_STATUS = ["available", "occupied", "reserved", "cleaning"];
+app.get("/api/tables", auth("admin", "reception", "pos", "kitchen", "waiter"), (req, res) => res.json(db.tables));
+app.get("/api/public/tables", (req, res) => res.json(db.tables.map(t => ({ id: t.id, number: t.number, capacity: t.capacity, section: t.section, status: t.status }))));
+app.post("/api/tables", auth("admin", "reception"), (req, res) => {
+  const { number, capacity, section } = req.body || {};
+  if (!number) return res.status(400).json({ error: "Table number is required" });
+  const t = { id: uid(), number, capacity: Number(capacity) || 2, section: section || "", status: "available", currentName: "", currentGuests: 0, seatedAt: "" };
+  db.tables.push(t); save(); changed("tables"); res.json(t);
+});
+app.put("/api/tables/:id", auth("admin", "reception"), (req, res) => {
+  const t = db.tables.find(x => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "Table not found" });
+  const b = req.body || {};
+  if (b.number !== undefined) t.number = b.number;
+  if (b.section !== undefined) t.section = b.section;
+  if (b.capacity !== undefined) t.capacity = Number(b.capacity) || 2;
+  if (b.status !== undefined && TABLE_STATUS.includes(b.status)) {
+    t.status = b.status;
+    if (t.status === "occupied") { if (b.customerName !== undefined) t.currentName = b.customerName; if (b.guests !== undefined) t.currentGuests = Number(b.guests) || 1; t.seatedAt = t.seatedAt || new Date().toISOString(); }
+    if (t.status === "available") { t.currentName = ""; t.currentGuests = 0; t.seatedAt = ""; }
+  }
+  save(); changed("tables"); res.json(t);
+});
+app.delete("/api/tables/:id", auth("admin"), (req, res) => {
+  db.tables = db.tables.filter(x => x.id !== req.params.id);
+  save(); changed("tables"); res.json({ ok: true });
+});
+/* seat a guest at a table */
+app.post("/api/tables/:id/seat", auth("admin", "reception", "pos"), (req, res) => {
+  const t = db.tables.find(x => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "Table not found" });
+  t.status = "occupied"; t.currentName = req.body.customerName || ""; t.currentGuests = Number(req.body.guests) || 1; t.seatedAt = new Date().toISOString();
+  save(); changed("tables"); res.json(t);
+});
+/* settle the whole table bill — mark all open orders paid + completed, free the table */
+app.post("/api/tables/:id/settle", auth("admin", "reception", "pos"), (req, res) => {
+  const t = db.tables.find(x => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "Table not found" });
+  const method = req.body.paymentMethod || "cash";
+  const open = db.orders.filter(o => o.tableId === t.id && !["completed", "cancelled"].includes(o.status));
+  open.forEach(o => { o.paid = true; o.status = "completed"; o.paymentMethod = method; const tr = db.transactions.find(x => x.refId === o.id); if (tr) tr.paid = true; });
+  t.status = "available"; t.currentName = ""; t.currentGuests = 0; t.seatedAt = "";
+  save(); changed("tables"); changed("orders");
+  notify("table", "🍽️ Table Settled", `Table ${t.number} settled — ${open.length} order(s) · ${method}`, { tableId: t.id });
+  res.json({ ok: true, settled: open.length });
 });
 
 /* ---------------- SPA fallback ---------------- */

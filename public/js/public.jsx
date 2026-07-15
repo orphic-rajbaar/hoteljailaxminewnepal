@@ -2260,7 +2260,8 @@ function ContactPage() {
 /* ---------------- CHECKOUT ---------------- */
 function CheckoutPage() {
   const [cart, setCart] = useCart();
-  const [f, setF] = useState(() => { const u = Auth.user; const cust = u && u.role === "customer"; return { name: (cust && u.name) || "", phone: (cust && u.phone) || "", table: "", paymentMethod: "cash" }; });
+  const [f, setF] = useState(() => { const u = Auth.user; const cust = u && u.role === "customer"; return { name: (cust && u.name) || "", phone: (cust && u.phone) || "", table: "", tableId: "", paymentMethod: "cash" }; });
+  const [tables] = useLive(() => api("/public/tables"), ["tables"]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState(null); // {booking, order}
@@ -2284,7 +2285,7 @@ function CheckoutPage() {
       if (cart.booking)
         result.booking = await api("/public/bookings", { method: "POST", body: { ...cart.booking, name: f.name, phone: f.phone, paymentMethod: f.paymentMethod } });
       if (cart.items.length)
-        result.order = await api("/public/orders", { method: "POST", body: { items: cart.items, name: f.name, phone: f.phone, table: f.table, paymentMethod: f.paymentMethod } });
+        result.order = await api("/public/orders", { method: "POST", body: { items: cart.items, name: f.name, phone: f.phone, table: f.table, tableId: f.tableId, paymentMethod: f.paymentMethod } });
       setCart({ items: [], booking: null });
       sessionStorage.setItem("hjl_last_order", JSON.stringify(result));
       go("/confirmation"); // auto-redirect to the confirmation / bill page after payment
@@ -2386,12 +2387,20 @@ function CheckoutPage() {
             <label>Phone number *</label>
             <input value={f.phone} onChange={e => setF({ ...f, phone: e.target.value })} placeholder="98XXXXXXXX" />
           </div>
-          {cart.items.length > 0 && (
+          {cart.items.length > 0 && (tables && tables.length > 0 ? (
+            <div className="f-input">
+              <label>Dining in? Choose your table</label>
+              <select value={f.tableId} onChange={e => { const t = tables.find(x => x.id === e.target.value); setF({ ...f, tableId: e.target.value, table: t ? t.number : "" }); }}>
+                <option value="">Takeaway / room service</option>
+                {tables.map(t => <option key={t.id} value={t.id} disabled={t.status !== "available"}>Table {t.number} · {t.capacity} seats{t.status !== "available" ? " — " + t.status.toUpperCase() : ""}</option>)}
+              </select>
+            </div>
+          ) : (
             <div className="f-input">
               <label>Table number (optional)</label>
               <input value={f.table} onChange={e => setF({ ...f, table: e.target.value })} placeholder="if dining in" />
             </div>
-          )}
+          ))}
           <label style={{ marginTop: 20, color: "var(--gold)", letterSpacing: 1.5, textTransform: "uppercase", fontSize: 11.5 }}>Choose Payment Method</label>
           <div className="pay-cards">
             <div className={"pay-card" + (f.paymentMethod === "esewa" ? " on" : "")} onClick={() => setF({ ...f, paymentMethod: "esewa" })}>
@@ -2801,7 +2810,7 @@ function LoginPage() {
       const r = await api("/auth/login", { method: "POST", body: f });
       Auth.set(r.token, r.user);
       const u = r.user;
-      go(u.role === "admin" ? "/admin" : (u.access || []).includes("reception") ? "/reception" : (u.access || []).includes("kitchen") ? "/kitchen" : "/");
+      { const acc = u.access || []; go(u.role === "admin" || acc.includes("admin") ? "/admin" : acc.includes("reception") ? "/reception" : acc.includes("kitchen") ? "/kitchen" : acc.includes("waiter") ? "/waiter" : acc.includes("pos") ? "/pos" : "/"); }
       window.dispatchEvent(new Event("auth-changed"));
     } catch (e2) { setErr(e2.message); }
     setBusy(false);

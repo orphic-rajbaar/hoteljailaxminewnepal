@@ -11,7 +11,7 @@ function App() {
   }, []);
 
   const path = route.split("?")[0]; // strip query (e.g. /payment-success?pid=..)
-  const isPanel = path.startsWith("/admin") || path.startsWith("/kitchen") || path.startsWith("/reception") || path.startsWith("/pos");
+  const isPanel = path.startsWith("/admin") || path.startsWith("/kitchen") || path.startsWith("/reception") || path.startsWith("/pos") || path.startsWith("/waiter");
   const cartCount = cart.items.reduce((s, i) => s + i.qty, 0) + (cart.booking ? 1 : 0);
 
   /* heritage light theme on public pages, dark theme on staff panels */
@@ -34,6 +34,7 @@ function App() {
   else if (path === "/checkin") page = <CheckinPage />;
   else if (path === "/login") page = <LoginPage />;
   else if (path.startsWith("/pos")) page = <PosPanel />;
+  else if (path.startsWith("/waiter")) page = <WaiterPanel />;
   else if (path.startsWith("/admin")) page = <AdminPanel />;
   else if (path.startsWith("/kitchen")) page = <KitchenPanel />;
   else if (path.startsWith("/reception")) page = <ReceptionPanel />;

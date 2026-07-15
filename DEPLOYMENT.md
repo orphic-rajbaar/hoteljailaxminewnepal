@@ -44,7 +44,7 @@ Do this **on your own computer** (I can't push for you — it needs your GitHub 
    git add .
    git commit -m "Hotel Jai Laxmi — full system with eSewa payments"
    git branch -M main
-   git remote add origin https://github.com/orphic-rajbaar/HOTELJAILAXMI.git
+   git remote add origin https://github.com/orphic-rajbaar/hoteljailaxminewnepal.git
    git push -u origin main
    ```
    When it asks to sign in, use the browser pop-up or a **Personal Access Token**
@@ -73,7 +73,7 @@ git push
 
 **A1. Pull the repo into cPanel (GitHub → GoDaddy directly):**
 1. cPanel → **Git™ Version Control** → **Create**.
-2. Clone URL: `https://github.com/orphic-rajbaar/HOTELJAILAXMI.git`
+2. Clone URL: `https://github.com/orphic-rajbaar/hoteljailaxminewnepal.git`
    Repository Path: e.g. `hoteljailaxmi`. Click **Create** — cPanel clones your
    repo straight from GitHub. (To pull later updates: open the repo here → **Pull**.)
 
@@ -92,7 +92,7 @@ If your cPanel has no "Setup Node.js App", your plan can't run Node — use Opti
 ```
 # on the server (Ubuntu example)
 sudo apt update && sudo apt install -y nodejs npm git
-git clone https://github.com/orphic-rajbaar/HOTELJAILAXMI.git
+git clone https://github.com/orphic-rajbaar/hoteljailaxminewnepal.git
 cd HOTELJAILAXMI
 npm install
 # create your .env (see Part 3)

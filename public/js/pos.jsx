@@ -201,10 +201,10 @@ function PosProductModal({ init, onClose }) {
 }
 
 /* =================== PRIVATE POS BILLING SCREEN (#/pos) =================== */
-function PosPanel() {
+function PosPanel({ embedded }) {
   const u = Auth.user;
   const allowed = !!u && (u.role === "admin" || Auth.can("reception") || Auth.can("pos"));
-  useEffect(() => { if (!allowed) go("/login"); }, []);
+  useEffect(() => { if (!allowed && !embedded) go("/login"); }, []);
   const [products] = useLive(() => api("/pos/products"), ["pos"]);
   const [menu] = useLive(() => api("/menu"), ["menu"]);
   const [rooms] = useLive(() => api("/pos/rooms"), ["bookings", "pos", "booking"]);
@@ -260,18 +260,20 @@ function PosPanel() {
   const panelLink = u && u.role === "admin" ? "/admin" : Auth.can("reception") ? "/reception" : "/";
 
   return (
-    <div className="panel notranslate" translate="no" style={{ minHeight: "100vh" }}>
-      <div className="main" style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 18, alignItems: "start" }}>
+    <div className={embedded ? "notranslate" : "panel notranslate"} translate="no" style={embedded ? {} : { minHeight: "100vh" }}>
+      <div className={embedded ? "pos-grid" : "main pos-grid"} style={{ display: "grid", gridTemplateColumns: "1fr 380px", gap: 18, alignItems: "start" }}>
         {/* ---- products ---- */}
         <div>
-          <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
-            <h2 className="pg" style={{ margin: 0 }}>🏪 POS Store Billing</h2>
-            <div className="flex" style={{ gap: 6 }}>
-              <button className="btn sm ghost" onClick={() => go(panelLink)}>← Back</button>
-              <button className="btn sm ghost" onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>Logout</button>
+          {!embedded && (
+            <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+              <h2 className="pg" style={{ margin: 0 }}>🏪 POS Store Billing</h2>
+              <div className="flex" style={{ gap: 6 }}>
+                <button className="btn sm ghost" onClick={() => go(panelLink)}>← Back</button>
+                <button className="btn sm ghost" onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>Logout</button>
+              </div>
             </div>
-          </div>
-          <input placeholder="🔍 Scan barcode or search product / food…" value={q} onChange={e => setQ(e.target.value)} autoFocus />
+          )}
+          <input placeholder="🔍 Scan barcode or search product / food…" value={q} onChange={e => setQ(e.target.value)} />
           <div className="flex mt mb" style={{ gap: 6, flexWrap: "wrap" }}>
             {cats.map(([k, l]) => <button key={k} className={"btn sm " + (cat === k ? "" : "ghost")} onClick={() => setCat(k)}>{l}</button>)}
           </div>
@@ -377,6 +379,246 @@ function PosPanel() {
           <div className="modal-actions"><button className="btn ghost" onClick={() => setPick(null)}>Cancel</button></div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* =================== RESTAURANT TABLES =================== */
+const TABLE_PILL = { available: "p-ready", occupied: "p-cancelled", reserved: "p-pending", cleaning: "p-pending" };
+
+/* Admin: create / edit / delete tables + set status */
+function TablesAdmin() {
+  const [tables] = useLive(() => api("/tables"), ["tables"]);
+  const [modal, setModal] = useState(null);
+  if (!tables) return <div className="empty">Loading…</div>;
+  return (
+    <div>
+      <PageHead t="🍽️ Table Management" s="Create tables, sections & seating — live status across all panels"
+        right={<button className="btn" onClick={() => setModal({})}>+ Add Table</button>} />
+      {tables.length === 0 && <div className="empty">No tables yet — add your first table.</div>}
+      <div className="grid c4">
+        {tables.map(t => (
+          <div className="card" key={t.id} style={{ padding: 14, textAlign: "center" }}>
+            <div style={{ fontSize: 30 }}>🍽️</div>
+            <b style={{ fontSize: 18 }}>Table {t.number}</b>
+            <div className="muted" style={{ fontSize: 12 }}>{t.capacity} seats{t.section ? " · " + t.section : ""}</div>
+            <div className="mt"><span className={"pill " + (TABLE_PILL[t.status] || "p-pending")}>{t.status}</span></div>
+            {t.status === "occupied" && t.currentName && <div className="muted" style={{ fontSize: 11.5 }}>{t.currentName} · {t.currentGuests} guest(s)</div>}
+            <select className="mt" value={t.status} onChange={e => api("/tables/" + t.id, { method: "PUT", body: { status: e.target.value } })}>
+              {["available", "occupied", "reserved", "cleaning"].map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <div className="flex mt" style={{ gap: 6, justifyContent: "center" }}>
+              <button className="btn sm ghost" onClick={() => setModal({ table: t })}>Edit</button>
+              <button className="btn sm danger" onClick={async () => { if (confirm("Delete Table " + t.number + "?")) await api("/tables/" + t.id, { method: "DELETE" }); }}>✕</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {modal && <TableModal init={modal} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+function TableModal({ init, onClose }) {
+  const t = init.table || {};
+  const [f, setF] = useState({ number: t.number || "", capacity: t.capacity || 4, section: t.section || "" });
+  const [err, setErr] = useState("");
+  const save = async () => {
+    setErr("");
+    if (!String(f.number).trim()) { setErr("Table number is required."); return; }
+    try {
+      if (init.table) await api("/tables/" + init.table.id, { method: "PUT", body: f });
+      else await api("/tables", { method: "POST", body: f });
+      onClose();
+    } catch (e) { setErr(e.message); }
+  };
+  return (
+    <Modal title={init.table ? "Edit Table" : "Add Table"} onClose={onClose}>
+      <div className="row">
+        <div><label>Table number *</label><input value={f.number} onChange={e => setF({ ...f, number: e.target.value })} placeholder="T05" /></div>
+        <div><label>Seating capacity</label><input type="number" value={f.capacity} onChange={e => setF({ ...f, capacity: e.target.value })} /></div>
+      </div>
+      <label>Floor / Section</label>
+      <input value={f.section} onChange={e => setF({ ...f, section: e.target.value })} placeholder="Ground floor / Garden / AC hall" />
+      {err && <p className="red mt">⚠ {err}</p>}
+      <div className="modal-actions"><button className="btn ghost" onClick={onClose}>Cancel</button><button className="btn" onClick={save}>Save Table</button></div>
+    </Modal>
+  );
+}
+
+/* merge a table's KOTs into one printable bill */
+function mergeTableBill(table, orders, method) {
+  const items = [];
+  orders.forEach(o => o.items.forEach(i => {
+    const ex = items.find(x => x.foodName === i.foodName && x.price === i.price);
+    if (ex) { ex.qty += i.qty; ex.amount += i.amount; } else items.push({ ...i });
+  }));
+  const total = orders.reduce((s, o) => s + o.total, 0);
+  return { no: "T" + table.number, billNo: "T" + table.number + "-" + String(Date.now()).slice(-5), items, total, name: table.currentName || ("Table " + table.number), table: table.number, paymentMethod: method, paid: true, createdAt: new Date().toISOString() };
+}
+
+/* Reception: dine-in service — grid of tables, then per-table ordering + settle */
+function TableService() {
+  const [tables] = useLive(() => api("/tables"), ["tables"]);
+  const [orders] = useLive(() => api("/orders"), ["orders", "order"]);
+  const [menu] = useLive(() => api("/menu"), ["menu"]);
+  const [active, setActive] = useState(null);
+  if (!tables || !orders || !menu) return <div className="empty">Loading…</div>;
+  const tableOrders = t => orders.filter(o => o.tableId === t.id && !["completed", "cancelled"].includes(o.status));
+  if (active) {
+    const t = tables.find(x => x.id === active);
+    if (!t) return <div className="empty">Table not found. <button className="btn sm" onClick={() => setActive(null)}>Back</button></div>;
+    return <TableDineIn table={t} orders={tableOrders(t)} menu={menu.filter(m => m.available !== false)} onClose={() => setActive(null)} />;
+  }
+  return (
+    <div>
+      <PageHead t="🍽️ Dine-In Tables" s="Tap a table to take orders, send KOT and settle the bill" />
+      {tables.length === 0 && <div className="empty">No tables yet — add them in Admin → Tables.</div>}
+      <div className="grid c4">
+        {tables.map(t => {
+          const os = tableOrders(t);
+          const bill = os.reduce((s, o) => s + o.total, 0);
+          return (
+            <div className="card" key={t.id} style={{ padding: 14, textAlign: "center", cursor: "pointer", borderColor: t.status === "occupied" ? "var(--red)" : "var(--gold-dim)" }} onClick={() => setActive(t.id)}>
+              <div style={{ fontSize: 30 }}>🍽️</div>
+              <b style={{ fontSize: 18 }}>Table {t.number}</b>
+              <div className="muted" style={{ fontSize: 12 }}>{t.capacity} seats{t.section ? " · " + t.section : ""}</div>
+              <div className="mt"><span className={"pill " + (TABLE_PILL[t.status] || "p-pending")}>{t.status}</span></div>
+              {os.length > 0 && <div className="mt" style={{ fontSize: 13 }}>{os.length} KOT · <b className="gold">{NPR(bill)}</b></div>}
+              {t.currentName && <div className="muted" style={{ fontSize: 11.5 }}>{t.currentName}</div>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+function TableDineIn({ table, orders, menu, onClose }) {
+  const [cart, setCart] = useState([]);
+  const [pay, setPay] = useState("cash");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const qtyOf = id => (cart.find(i => i.id === id) || {}).qty || 0;
+  const add = (m, d) => setCart(c => { const rest = c.filter(i => i.id !== m.id); const q = qtyOf(m.id) + d; return q > 0 ? [...rest, { id: m.id, foodName: m.foodName, price: m.price, qty: q }] : rest; });
+  const priorBill = orders.reduce((s, o) => s + o.total, 0);
+  const cartTotal = cart.reduce((s, i) => s + i.qty * i.price, 0);
+  const grand = priorBill + cartTotal;
+  const sendKOT = async () => {
+    if (!cart.length) return;
+    setBusy(true); setErr("");
+    try {
+      const o = await api("/orders", { method: "POST", body: { items: cart, tableId: table.id, name: table.currentName || ("Table " + table.number), paymentMethod: "table" } });
+      printHTML(billHTML(o, "kitchen"));
+      setCart([]);
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const settle = async () => {
+    if (cart.length) { setErr("Send or clear the new items first."); return; }
+    if (!orders.length) { setErr("No orders on this table yet."); return; }
+    setBusy(true); setErr("");
+    try {
+      const merged = mergeTableBill(table, orders, pay);
+      await api("/tables/" + table.id + "/settle", { method: "POST", body: { paymentMethod: pay } });
+      printHTML(billHTML(merged, "customer"));
+      onClose();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <div>
+      <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+        <h2 className="pg" style={{ margin: 0 }}>🍽️ Table {table.number} {table.currentName ? "· " + table.currentName : ""}</h2>
+        <button className="btn ghost" onClick={onClose}>← All Tables</button>
+      </div>
+      <div className="pos">
+        <div className="grid c4">
+          {menu.map(m => (
+            <div className="card menu-card" key={m.id} style={{ cursor: "pointer" }} onClick={() => add(m, 1)}>
+              <div className="ph" style={{ height: 80 }}>{m.photo ? <img src={m.photo} /> : <span className="noimg">🍛</span>}</div>
+              <div className="body" style={{ padding: 8 }}>
+                <div className="fname" style={{ fontSize: 13 }}><span className={"veg-dot " + m.foodType}></span>{m.foodName}</div>
+                <div className="flex spread"><span className="fprice">{NPR(m.price)}</span>{qtyOf(m.id) > 0 && <span className="pill p-ready">×{qtyOf(m.id)}</span>}</div>
+              </div>
+            </div>
+          ))}
+          {menu.length === 0 && <div className="empty">No menu items yet.</div>}
+        </div>
+        <div className="card pos-cart">
+          <h4 className="gold mb">Table {table.number} Bill</h4>
+          {orders.length > 0 && (
+            <div className="mb" style={{ fontSize: 12.5 }}>
+              <div className="muted">Already sent to kitchen:</div>
+              {orders.map(o => <div key={o.id} className="flex spread"><span>KOT #{o.no} · {o.items.length} item(s)</span><b>{NPR(o.total)}</b></div>)}
+            </div>
+          )}
+          <div className="muted" style={{ fontSize: 12 }}>New items:</div>
+          {cart.length === 0 && <p className="muted">Tap dishes to add a new KOT.</p>}
+          {cart.map(i => (
+            <div className="line" key={i.id}><span>{i.foodName}</span><span className="flex" style={{ gap: 6 }}><button className="btn sm ghost" onClick={() => add(i, -1)}>−</button><b>{i.qty}</b><button className="btn sm ghost" onClick={() => add(i, 1)}>+</button></span><b>{NPR(i.qty * i.price)}</b></div>
+          ))}
+          <div className="total"><span>Grand Total</span><span>{NPR(grand)}</span></div>
+          {err && <p className="red mt">⚠ {err}</p>}
+          <button className="btn mt" style={{ width: "100%" }} disabled={busy || !cart.length} onClick={sendKOT}>🍳 Send KOT — {NPR(cartTotal)}</button>
+          <label className="mt">Settle payment method</label>
+          <div className="flex" style={{ flexWrap: "wrap" }}>{["cash", "esewa", "qr", "card", "wallet", "credit"].map(m => <button key={m} className={"btn sm " + (pay === m ? "" : "ghost")} onClick={() => setPay(m)}>{m}</button>)}</div>
+          <button className="btn green mt" style={{ width: "100%" }} disabled={busy || !orders.length} onClick={settle}>💰 Settle & Free Table — {NPR(priorBill)}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* =================== WAITER PANEL =================== */
+function WaiterPanel() {
+  const u = Auth.user;
+  const allowed = !!u && (u.role === "admin" || Auth.can("reception") || Auth.can("waiter"));
+  useEffect(() => { if (!allowed) go("/login"); }, []);
+  const [orders] = useLive(() => api("/orders"), ["orders", "order"]);
+  if (!allowed) return null;
+  if (!orders) return <div className="empty">Loading…</div>;
+  const ready = orders.filter(o => o.status === "ready");
+  const making = orders.filter(o => ["pending", "received", "making"].includes(o.status));
+  const served = orders.filter(o => o.status === "served").slice(0, 10);
+  const serve = async o => { await api("/orders/" + o.id, { method: "PATCH", body: { status: "served" } }); };
+  const where = o => o.table ? "🍽 Table " + o.table : o.roomNumber ? "🛏 Room " + o.roomNumber : (o.source === "online" ? "🛵 " + (o.name || "Takeaway") : "🧾 " + (o.name || "Counter"));
+  return (
+    <div className="panel notranslate" translate="no" style={{ minHeight: "100vh" }}>
+      <div className="main">
+        <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+          <h2 className="pg" style={{ margin: 0 }}>🛎️ Waiter — Serve Orders</h2>
+          <div className="flex" style={{ gap: 6 }}>
+            <button className="btn sm ghost" onClick={() => go("/")}>🌐 Site</button>
+            <button className="btn sm ghost" onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>Logout</button>
+          </div>
+        </div>
+        <h4 className="gold mb">🛎️ Ready to serve ({ready.length})</h4>
+        {ready.length === 0 && <div className="empty">No orders ready right now — the kitchen will send them here.</div>}
+        <div className="grid c3">
+          {ready.map(o => (
+            <div className="card" key={o.id} style={{ borderColor: "var(--green)" }}>
+              <div className="flex spread"><b className="gold">Order #{o.no}</b><span className="pill p-ready">READY</span></div>
+              <div className="muted" style={{ fontSize: 13 }}>{where(o)}</div>
+              <div className="mt" style={{ fontSize: 13 }}>{o.items.map(i => i.qty + "× " + i.foodName).join(", ")}</div>
+              <button className="btn green mt" style={{ width: "100%" }} onClick={() => serve(o)}>✅ Served / Delivered</button>
+            </div>
+          ))}
+        </div>
+        {making.length > 0 && <React.Fragment>
+          <h4 className="gold mb mt">👨‍🍳 In the kitchen ({making.length})</h4>
+          <div className="grid c4">
+            {making.map(o => (
+              <div className="card" key={o.id} style={{ padding: 12 }}>
+                <div className="flex spread"><b>#{o.no}</b><span className="pill p-pending">{o.status}</span></div>
+                <div className="muted" style={{ fontSize: 12 }}>{where(o)}</div>
+              </div>
+            ))}
+          </div>
+        </React.Fragment>}
+        {served.length > 0 && <React.Fragment>
+          <h4 className="gold mb mt">Recently served</h4>
+          <div className="muted" style={{ fontSize: 13 }}>{served.map(o => "#" + o.no).join(" · ")}</div>
+        </React.Fragment>}
+      </div>
     </div>
   );
 }
