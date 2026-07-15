@@ -49,7 +49,9 @@ function freshDB() {
     content: defaultContent(),
     payments: [],   // eSewa & other payment transactions
     auditLog: [],   // deletions & sensitive admin actions
-    counters: { order: 0, booking: 0, bill: 0, invoice: 0 }
+    posProducts: [], // private POS store: cigarettes, alcohol, beverages
+    posSales: [],    // private POS store sales
+    counters: { order: 0, booking: 0, bill: 0, invoice: 0, posSale: 0, posInvoice: 0 }
   };
 }
 
@@ -84,7 +86,11 @@ if (fs.existsSync(DB_FILE)) {
   db.reviews = db.reviews || [];
   db.payments = db.payments || [];
   db.auditLog = db.auditLog || [];
+  db.posProducts = db.posProducts || [];
+  db.posSales = db.posSales || [];
   db.counters.invoice = db.counters.invoice || 0;
+  db.counters.posSale = db.counters.posSale || 0;
+  db.counters.posInvoice = db.counters.posInvoice || 0;
   db.payment = db.payment || {};
   if (db.payment.esewaMode === undefined) db.payment.esewaMode = "test";
   if (db.payment.esewaProductCode === undefined) db.payment.esewaProductCode = "EPAYTEST";
@@ -662,7 +668,7 @@ app.patch("/api/bookings/:id", auth("admin", "reception"), (req, res) => {
 });
 
 /* ---------------- Restaurant Menu ---------------- */
-app.get("/api/menu", auth("admin", "reception", "kitchen"), (req, res) => res.json(db.menu));
+app.get("/api/menu", auth("admin", "reception", "kitchen", "pos"), (req, res) => res.json(db.menu));
 app.post("/api/menu", auth("admin"), (req, res) => {
   const { foodName, price, foodType, photo, category, desc, prepTime, spice, chefSpecial } = req.body || {};
   if (!foodName) return res.status(400).json({ error: "Food name required" });
@@ -1065,6 +1071,165 @@ app.get("/api/stats", auth("admin", "reception"), (req, res) => {
     credits: db.credits.filter(c => !c.settled).reduce((s, c) => s + c.amount, 0),
     income, expense, profit: income - expense
   });
+});
+
+/* ================= PRIVATE POS STORE (cigarettes, alcohol, beverages) =================
+   Staff-only. Products carry a `units` list (each with a price and how many base
+   stock units it consumes), so piece/half/full/box and full/half/quarter/per-ml
+   pricing all work through one model. Stock deducts live on every sale. */
+const POS_TYPES = ["cigarette", "alcohol", "beverage"];
+
+app.get("/api/pos/products", auth("admin", "reception", "pos"), (req, res) => res.json(db.posProducts.slice().reverse()));
+app.post("/api/pos/products", auth("admin"), (req, res) => {
+  const b = req.body || {};
+  if (!POS_TYPES.includes(b.type)) return res.status(400).json({ error: "Invalid product type" });
+  if (!b.name) return res.status(400).json({ error: "Brand / product name is required" });
+  const p = {
+    id: uid(), type: b.type, name: b.name, category: b.category || "", photo: b.photo || "",
+    barcode: b.barcode || "", sku: b.sku || "", status: b.status || "active",
+    stock: Number(b.stock) || 0, stockAlert: Number(b.stockAlert) || 0,
+    baseUnit: b.baseUnit || "unit", meta: b.meta || {},
+    units: Array.isArray(b.units) ? b.units.map(u => ({ key: String(u.key), label: String(u.label), price: Number(u.price) || 0, consumes: Number(u.consumes) || 1 })) : [],
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+  };
+  db.posProducts.push(p); save(); changed("pos");
+  db.auditLog.push({ at: p.createdAt, by: req.user.name, action: "POS product added: " + p.name });
+  res.json(p);
+});
+app.put("/api/pos/products/:id", auth("admin"), (req, res) => {
+  const p = db.posProducts.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  const b = req.body || {};
+  ["name", "category", "photo", "barcode", "sku", "status", "baseUnit"].forEach(k => { if (b[k] !== undefined) p[k] = b[k]; });
+  if (b.stock !== undefined) p.stock = Number(b.stock) || 0;
+  if (b.stockAlert !== undefined) p.stockAlert = Number(b.stockAlert) || 0;
+  if (b.meta !== undefined) p.meta = b.meta;
+  if (Array.isArray(b.units)) p.units = b.units.map(u => ({ key: String(u.key), label: String(u.label), price: Number(u.price) || 0, consumes: Number(u.consumes) || 1 }));
+  p.updatedAt = new Date().toISOString();
+  save(); changed("pos");
+  db.auditLog.push({ at: p.updatedAt, by: req.user.name, action: "POS product edited: " + p.name });
+  res.json(p);
+});
+app.patch("/api/pos/products/:id/stock", auth("admin", "reception", "pos"), (req, res) => {
+  const p = db.posProducts.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  const add = Number(req.body.add) || 0;
+  p.stock = Math.max(0, (p.stock || 0) + add); p.updatedAt = new Date().toISOString();
+  save(); changed("pos");
+  db.auditLog.push({ at: p.updatedAt, by: req.user.name, action: `POS restock ${p.name}: +${add} ${p.baseUnit}` });
+  res.json(p);
+});
+app.delete("/api/pos/products/:id", auth("admin"), (req, res) => {
+  const p = db.posProducts.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Product not found" });
+  db.posProducts = db.posProducts.filter(x => x.id !== req.params.id);
+  save(); changed("pos");
+  db.auditLog.push({ at: new Date().toISOString(), by: req.user.name, action: "POS product DELETED: " + p.name });
+  res.json({ ok: true });
+});
+
+/* POS sale — builds the bill, deducts stock, optionally charges a room */
+app.post("/api/pos/sales", auth("admin", "reception", "pos"), (req, res) => {
+  const b = req.body || {};
+  const items = Array.isArray(b.items) ? b.items : [];
+  if (!items.length) return res.status(400).json({ error: "Cart is empty" });
+  const lines = []; let subtotal = 0; const deductions = [];
+  for (const it of items) {
+    if (it.foodId) {
+      const m = db.menu.find(x => x.id === it.foodId);
+      if (!m) continue;
+      const qty = Math.max(1, Number(it.qty) || 1);
+      lines.push({ kind: "food", productId: m.id, name: m.foodName, unitLabel: "plate", price: m.price, qty, amount: qty * m.price });
+      subtotal += qty * m.price;
+    } else {
+      const p = db.posProducts.find(x => x.id === it.productId);
+      if (!p) continue;
+      if (p.status !== "active") return res.status(400).json({ error: p.name + " is not available" });
+      const u = (p.units || []).find(x => x.key === it.unitKey);
+      if (!u) return res.status(400).json({ error: "Invalid unit for " + p.name });
+      const qty = Math.max(1, Number(it.qty) || 1);
+      const need = u.consumes * qty;
+      if (need > (p.stock || 0) + 1e-9) return res.status(409).json({ error: `Not enough stock for ${p.name} (${p.stock} ${p.baseUnit} left)` });
+      lines.push({ kind: "pos", productId: p.id, type: p.type, name: p.name, unitKey: u.key, unitLabel: u.label, price: u.price, qty, amount: qty * u.price });
+      subtotal += qty * u.price;
+      deductions.push([p, need]);
+    }
+  }
+  if (!lines.length) return res.status(400).json({ error: "No valid items in cart" });
+  const discount = Math.max(0, Number(b.discount) || 0);
+  const taxRate = Math.max(0, Number(b.taxRate) || 0);
+  const serviceRate = Math.max(0, Number(b.serviceRate) || 0);
+  const taxed = Math.max(0, subtotal - discount);
+  const tax = Math.round(taxed * taxRate) / 100;
+  const service = Math.round(taxed * serviceRate) / 100;
+  const total = Math.round((taxed + tax + service) * 100) / 100;
+  const method = b.paymentMethod || "cash";
+  deductions.forEach(([p, need]) => { p.stock = Math.max(0, (p.stock || 0) - need); p.updatedAt = new Date().toISOString(); });
+  db.counters.posSale++; db.counters.posInvoice++;
+  const sale = {
+    id: uid(), no: db.counters.posSale, invoiceNumber: "POS-" + String(db.counters.posInvoice).padStart(5, "0"),
+    items: lines, subtotal, discount, taxRate, tax, serviceRate, service, total,
+    paymentMethod: method, roomId: b.roomId || "", roomBill: !!b.addToRoomBill,
+    customerName: b.customerName || "Walk-in", phone: b.phone || "",
+    cashier: req.user.name, cashierId: req.user.id, createdAt: new Date().toISOString()
+  };
+  db.posSales.push(sale);
+  if (b.addToRoomBill && b.roomId) {
+    const room = db.rooms.find(r => r.id === b.roomId);
+    const bk = room ? db.bookings.slice().reverse().find(x => x.roomId === room.id && !["checked-out", "cancelled"].includes(x.status)) : null;
+    if (!bk) return res.status(400).json({ error: "No active booking found for this room" });
+    bk.extraCharges = bk.extraCharges || [];
+    bk.extraCharges.push({ saleId: sale.id, no: sale.no, amount: total, note: "POS store", at: sale.createdAt });
+    bk.total = (bk.total || 0) + total;
+    bk.pendingAmount = (bk.pendingAmount || 0) + total;
+    bk.paid = bk.pendingAmount <= 0;
+    sale.bookingId = bk.id; sale.roomNumber = bk.roomNumber;
+    changed("bookings");
+  }
+  const settledNow = !sale.roomBill && method !== "credit";
+  db.transactions.push({ id: uid(), kind: "income", category: "POS Store", amount: total, note: `POS ${sale.invoiceNumber} — ${sale.customerName} (${method})`, paid: settledNow, refId: sale.id, date: sale.createdAt });
+  db.auditLog.push({ at: sale.createdAt, by: req.user.name, action: `POS sale ${sale.invoiceNumber} रू ${total} (${method})` });
+  save(); changed("pos"); changed("transactions");
+  notify("pos", "🧾 POS Store Sale", `${sale.invoiceNumber} — रू ${total} · ${lines.length} item(s) · by ${sale.cashier}`, sale);
+  res.json(sale);
+});
+app.get("/api/pos/sales", auth("admin", "reception", "pos"), (req, res) => res.json(db.posSales.slice().reverse()));
+
+/* POS analytics + inventory alerts */
+app.get("/api/pos/report", auth("admin", "reception", "pos"), (req, res) => {
+  const now = new Date(), today = now.toDateString(), dayMs = 86400000;
+  const sales = db.posSales;
+  const inRange = (s, d) => now - new Date(s.createdAt) < d * dayMs;
+  const sum = arr => arr.reduce((s, x) => s + (x.total || 0), 0);
+  const todaySales = sales.filter(s => new Date(s.createdAt).toDateString() === today);
+  const byCategory = { cigarette: 0, alcohol: 0, beverage: 0, food: 0 };
+  const prodCount = {};
+  sales.forEach(s => s.items.forEach(i => {
+    const k = i.kind === "food" ? "food" : (i.type || "beverage");
+    byCategory[k] = (byCategory[k] || 0) + i.amount;
+    prodCount[i.name] = (prodCount[i.name] || 0) + i.qty;
+  }));
+  res.json({
+    todayRevenue: sum(todaySales), todayCount: todaySales.length,
+    weekRevenue: sum(sales.filter(s => inRange(s, 7))), monthRevenue: sum(sales.filter(s => inRange(s, 30))),
+    total: sum(sales), count: sales.length, byCategory,
+    topProducts: Object.entries(prodCount).sort((a, b) => b[1] - a[1]).slice(0, 8),
+    lowStock: db.posProducts.filter(p => p.stockAlert > 0 && p.stock <= p.stockAlert && p.stock > 0).map(p => ({ name: p.name, stock: p.stock, alert: p.stockAlert, unit: p.baseUnit })),
+    outOfStock: db.posProducts.filter(p => p.stock <= 0).map(p => ({ name: p.name }))
+  });
+});
+
+/* active rooms for the POS "assign to room" dropdown (safe subset) */
+app.get("/api/pos/rooms", auth("admin", "reception", "pos"), (req, res) => {
+  const active = db.bookings.filter(b => !["checked-out", "cancelled"].includes(b.status));
+  const seen = {};
+  const rooms = [];
+  for (const b of active.slice().reverse()) {
+    if (seen[b.roomId]) continue;
+    seen[b.roomId] = 1;
+    rooms.push({ roomId: b.roomId, roomNumber: b.roomNumber, guest: b.name, bookingNo: b.no });
+  }
+  res.json(rooms);
 });
 
 /* ---------------- SPA fallback ---------------- */

@@ -23,6 +23,7 @@ function PanelShell({ area, title, tabs, tab, setTab, children }) {
         {u.role === "admin" && area !== "admin" && <button onClick={() => go("/admin")}>👑 Admin Panel</button>}
         {Auth.can("reception") && area !== "reception" && <button onClick={() => go("/reception")}>🛎 Reception</button>}
         {Auth.can("kitchen") && area !== "kitchen" && <button onClick={() => go("/kitchen")}>👨‍🍳 Kitchen</button>}
+        {(u.role === "admin" || Auth.can("reception") || Auth.can("pos")) && <button onClick={() => go("/pos")}>🏪 POS Billing</button>}
         <button onClick={() => go("/")}>🌐 Public Site</button>
         <button onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>🚪 Logout ({u.name.split(" ")[0]})</button>
       </div>
@@ -55,9 +56,11 @@ function AdminPanel() {
     { id: "reservations", icon: "🪑", label: "Reservations" },
     { id: "gallery", icon: "🖼️", label: "Gallery" },
     { id: "reviews", icon: "⭐", label: "Reviews" },
+    { id: "posstore", icon: "🏪", label: "POS Store" },
     { id: "inventory", icon: "📦", label: "Inventory" },
     { id: "employees", icon: "👥", label: "Employees" },
     { id: "credit", icon: "💳", label: "Credit" },
+    { id: "verify", icon: "✅", label: "Verify Pay" },
     { id: "payments", icon: "💰", label: "Payments" },
     { id: "payment", icon: "🏦", label: "Payment / Bank" },
     { id: "branding", icon: "🎨", label: "Logo & Branding" },
@@ -77,9 +80,11 @@ function AdminPanel() {
       {tab === "reservations" && <ReservationsTable />}
       {tab === "gallery" && <GalleryTab />}
       {tab === "reviews" && <ReviewsTab />}
+      {tab === "posstore" && <PosStoreAdmin />}
       {tab === "inventory" && <InventoryTab />}
       {tab === "employees" && <EmployeesTab />}
       {tab === "credit" && <CreditTab />}
+      {tab === "verify" && <PaymentVerify />}
       {tab === "payments" && <PaymentsTab />}
       {tab === "payment" && <PaymentTab />}
       {tab === "branding" && <BrandingTab />}
@@ -779,6 +784,7 @@ function EmpModal({ init, onClose }) {
       <div className="flex">
         <button className={"btn sm " + (f.access.includes("kitchen") ? "" : "ghost")} onClick={() => toggle("kitchen")}>👨‍🍳 Kitchen Panel</button>
         <button className={"btn sm " + (f.access.includes("reception") ? "" : "ghost")} onClick={() => toggle("reception")}>🛎 Reception Panel</button>
+        <button className={"btn sm " + (f.access.includes("pos") ? "" : "ghost")} onClick={() => toggle("pos")}>🏪 POS / Cashier</button>
       </div>
       {f.access.length > 0 && (
         <div className="row">
@@ -1587,6 +1593,70 @@ function PayCharts({ rows }) {
           <div className="muted mb" style={{ fontSize: 12.5, textAlign: "center" }}>Room vs Restaurant (by amount)</div>
           <div style={{ height: 210 }}><canvas ref={typeRef} /></div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ PAYMENT VERIFICATION (admin + reception) ============
+   One place to verify online payments (eSewa / QR / cash) for both room
+   bookings and restaurant orders, then print the bill. */
+function PaymentVerify() {
+  const [bookings] = useLive(() => api("/bookings"), ["bookings", "booking"]);
+  const [orders] = useLive(() => api("/orders"), ["orders", "order"]);
+  const [tab, setTab] = useState("pending");
+  if (!bookings || !orders) return <div className="empty">Loading…</div>;
+  const rows = [];
+  bookings.forEach(b => {
+    const total = b.total !== undefined ? b.total : (b.nights || 1) * (Number(b.price) || 0);
+    const paid = b.paidAmount !== undefined ? b.paidAmount : (b.paid ? total : 0);
+    rows.push({ kind: "room", id: b.id, ref: "Booking #" + b.no, name: b.name, phone: b.phone, method: b.paymentMethod || "cash", total, pending: total - paid, isPaid: total - paid <= 0, when: b.createdAt, obj: b });
+  });
+  orders.forEach(o => {
+    rows.push({ kind: "food", id: o.id, ref: "Order #" + o.no, name: o.name, phone: o.phone, method: o.paymentMethod || "cash", total: o.total, pending: o.paid ? 0 : o.total, isPaid: !!o.paid, when: o.createdAt, obj: o });
+  });
+  rows.sort((a, b) => new Date(b.when) - new Date(a.when));
+  const online = m => ["online", "esewa", "qr"].includes(m);
+  const list = rows.filter(r => tab === "all" ? true : tab === "online" ? online(r.method) : !r.isPaid);
+  const methodLabel = m => ({ cash: "💵 Cash", online: "📱 QR/Online", esewa: "🟢 eSewa", qr: "📱 QR", credit: "💳 Credit", other: "🏦 Other" }[m] || m);
+  const verify = async r => {
+    if (r.isPaid) return;
+    if (!confirm("Verify payment received for " + r.ref + " (" + NPR(r.total) + ") and mark as PAID?")) return;
+    if (r.kind === "room") await api("/bookings/" + r.id, { method: "PATCH", body: { paid: true } });
+    else await api("/orders/" + r.id, { method: "PATCH", body: { paid: true } });
+  };
+  const printBill = r => r.kind === "room" ? printHTML(roomBillHTML(r.obj)) : printHTML(billHTML(r.obj, "customer"));
+  const pendingCount = rows.filter(r => !r.isPaid).length;
+  return (
+    <div>
+      <PageHead t="✅ Payment Verification" s={"Verify online payments for rooms & restaurant, then print the bill · " + pendingCount + " pending"} />
+      <div className="flex mb" style={{ gap: 8, flexWrap: "wrap" }}>
+        {[["pending", "Pending"], ["online", "Online (eSewa / QR)"], ["all", "All"]].map(([k, l]) => (
+          <button key={k} className={"btn sm " + (tab === k ? "" : "ghost")} onClick={() => setTab(k)}>{l}</button>
+        ))}
+      </div>
+      <div className="tbl-wrap">
+        <table>
+          <thead><tr><th>Ref</th><th>Type</th><th>Customer</th><th>Method</th><th>Total</th><th>Status</th><th>Date</th><th>Actions</th></tr></thead>
+          <tbody>
+            {list.map(r => (
+              <tr key={r.kind + r.id}>
+                <td><b>{r.ref}</b></td>
+                <td>{r.kind === "room" ? "🛏 Room" : "🍽 Food"}</td>
+                <td>{r.name}{r.phone ? <span className="muted"> · {r.phone}</span> : null}</td>
+                <td>{methodLabel(r.method)}</td>
+                <td><b>{NPR(r.total)}</b></td>
+                <td>{r.isPaid ? <span className="pill p-ready">paid ✓</span> : <span className="pill p-cancelled">due {NPR(r.pending)}</span>}</td>
+                <td className="muted" style={{ fontSize: 11.5 }}>{fmtDT(r.when)}</td>
+                <td className="flex" style={{ gap: 5 }}>
+                  {!r.isPaid && <button className="btn sm green" onClick={() => verify(r)}>Verify ✓</button>}
+                  <button className="btn sm ghost" onClick={() => printBill(r)}>🖨 Bill</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {list.length === 0 && <div className="empty">Nothing to show for this filter.</div>}
       </div>
     </div>
   );

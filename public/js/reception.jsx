@@ -9,6 +9,7 @@ function ReceptionPanel() {
     { id: "rooms", icon: "🏛", label: "Floors & Rooms" },
     { id: "pos", icon: "🧾", label: "POS Billing" },
     { id: "orders", icon: "🍽️", label: "Orders" },
+    { id: "verify", icon: "✅", label: "Verify & Bill" },
     { id: "reservations", icon: "🪑", label: "Reservations" },
     { id: "money", icon: "💰", label: "Income / Expense" },
     { id: "credit", icon: "💳", label: "Credit" }
@@ -20,6 +21,7 @@ function ReceptionPanel() {
       {tab === "rooms" && <FloorsRooms />}
       {tab === "pos" && <POS />}
       {tab === "orders" && <OrdersTable canBill />}
+      {tab === "verify" && <PaymentVerify />}
       {tab === "reservations" && <ReservationsTable />}
       {tab === "money" && <MoneyTab />}
       {tab === "credit" && <CreditTab />}
@@ -61,10 +63,15 @@ function ReceptionBookModal({ room, onClose }) {
   });
   const [err, setErr] = useState("");
   const [done, setDone] = useState(null);
+  const [qr, setQr] = useState(null);
   const nights = nightsCalc(f.checkIn, f.checkOut);
   const total = nights * (Number(room.price) || 0);
   const paidAmt = Math.max(0, Math.min(total, Number(f.paidAmount) || 0));
   const pending = total - paidAmt;
+  useEffect(() => {
+    if (["esewa", "qr"].includes(f.paymentMethod) && total > 0)
+      api("/public/qr?amount=" + total).then(setQr).catch(() => setQr(null));
+  }, [f.paymentMethod, total]);
   const save = async () => {
     setErr("");
     try {
@@ -111,13 +118,14 @@ function ReceptionBookModal({ room, onClose }) {
         <span className="amt">{NPR(total)}</span>
       </div>
       <label>Payment method</label>
-      <div className="flex">
-        {["cash", "online", "credit", "other"].map(m => (
-          <button key={m} className={"btn sm " + (f.paymentMethod === m ? "" : "ghost")} onClick={() => setF({ ...f, paymentMethod: m })}>
-            {m === "cash" ? "💵 Cash" : m === "online" ? "📱 Online" : m === "credit" ? "💳 Credit" : "🏦 Other"}
-          </button>
+      <div className="flex" style={{ flexWrap: "wrap" }}>
+        {[["cash", "💵 Cash"], ["esewa", "🟢 eSewa"], ["qr", "📱 QR"], ["credit", "💳 Credit"], ["other", "🏦 Other"]].map(([m, l]) => (
+          <button key={m} className={"btn sm " + (f.paymentMethod === m ? "" : "ghost")} onClick={() => setF({ ...f, paymentMethod: m })}>{l}</button>
         ))}
       </div>
+      {["esewa", "qr"].includes(f.paymentMethod) && (qr
+        ? <div className="qr-box"><PayQR payload={qr.payload} size={150} /><p>{qr.accountName}{qr.bankName ? " · " + qr.bankName : ""}</p><p style={{ color: "#555" }}>Guest scans to pay {NPR(total)} — then set the paid amount below & Verify.</p></div>
+        : <p className="muted mt">⚠ Set up the payment QR in Admin → Payment / Bank to show a scan code here.</p>)}
       <div className="row">
         <div>
           <label>Paid amount now (रू)</label>
@@ -160,7 +168,7 @@ function POS() {
   const total = cart.reduce((s, i) => s + i.qty * i.price, 0) + (room ? Number(room.price) : 0);
 
   useEffect(() => {
-    if (f.paymentMethod === "online" && total > 0)
+    if (["esewa", "qr", "online"].includes(f.paymentMethod) && total > 0)
       api("/public/qr?amount=" + total).then(setQr).catch(() => setQr(null));
   }, [f.paymentMethod, total]);
 
@@ -263,15 +271,13 @@ function POS() {
             <div><label>Table</label><input value={f.table} onChange={e => setF({ ...f, table: e.target.value })} /></div>
           </div>
           <label>Payment method</label>
-          <div className="flex">
-            {["cash", "online", "credit"].map(m => (
-              <button key={m} className={"btn sm " + (f.paymentMethod === m ? "" : "ghost")} onClick={() => setF({ ...f, paymentMethod: m })}>
-                {m === "cash" ? "💵 Cash" : m === "online" ? "📱 QR" : "💳 Credit"}
-              </button>
+          <div className="flex" style={{ flexWrap: "wrap" }}>
+            {[["cash", "💵 Cash"], ["esewa", "🟢 eSewa"], ["qr", "📱 QR"], ["credit", "💳 Credit"]].map(([m, l]) => (
+              <button key={m} className={"btn sm " + (f.paymentMethod === m ? "" : "ghost")} onClick={() => setF({ ...f, paymentMethod: m })}>{l}</button>
             ))}
           </div>
-          {f.paymentMethod === "online" && qr && (
-            <div className="qr-box"><PayQR payload={qr.payload} size={140} /><p>{NPR(total)}</p></div>
+          {["esewa", "qr"].includes(f.paymentMethod) && qr && (
+            <div className="qr-box"><PayQR payload={qr.payload} size={140} /><p>Scan to pay {NPR(total)}</p></div>
           )}
           {err && <p className="red mt">⚠ {err}</p>}
           <button className="btn mt" style={{ width: "100%" }} disabled={!cart.length && !room} onClick={charge}>
