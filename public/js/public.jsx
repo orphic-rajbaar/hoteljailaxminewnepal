@@ -2911,7 +2911,8 @@ function LoginPage() {
       <form className="card login-card" onSubmit={login}>
         <LogoImg />
         <h3 style={{ fontFamily: "var(--font-display)", color: "var(--gold2)", fontSize: 24 }}>Staff Login</h3>
-        <p className="muted">Admin · Reception · Kitchen</p>
+        <p className="muted">Admin · Reception · Kitchen · Waiter</p>
+        <GoogleLoginBtn onDone={() => { const u = Auth.user || {}; const acc = u.access || []; go(u.role === "admin" || acc.includes("admin") ? "/admin" : acc.includes("reception") ? "/reception" : acc.includes("kitchen") ? "/kitchen" : acc.includes("waiter") ? "/waiter" : acc.includes("pos") ? "/pos" : "/"); }} setErr={setErr} />
         <label style={{ textAlign: "left" }}>Email</label>
         <input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} autoFocus />
         <label style={{ textAlign: "left" }}>Password</label>

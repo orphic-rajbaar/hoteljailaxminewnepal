@@ -42,11 +42,15 @@ function buildBeverageUnits(m) {
   ];
 }
 
-/* ---- POS bill (cashier or customer copy) with logo ---- */
+/* ---- POS bill: customer / cashier / reception copy, with logo ---- */
 function posBillHTML(sale, kind) {
   const rows = sale.items.map(i => `<tr><td>${i.name}${i.unitLabel ? " (" + i.unitLabel + ")" : ""}</td><td class="r">${i.qty}</td><td class="r">${i.price}</td><td class="r">${i.amount}</td></tr>`).join("");
   const cashier = kind === "cashier";
-  return `${HOTEL_HEAD()}<h4>${cashier ? "CASHIER COPY" : "CUSTOMER BILL"}</h4>
+  const title = kind === "reception" ? "RECEPTION COPY" : cashier ? "CASHIER COPY" : "CUSTOMER BILL";
+  const payLine = sale.paymentMethod === "split"
+    ? `SPLIT · Cash रू ${sale.splitCash || 0} + Online रू ${sale.splitOnline || 0}`
+    : (sale.paymentMethod || "cash").toUpperCase() + (sale.razorpayPaymentId ? " · " + sale.razorpayPaymentId : "");
+  return `${HOTEL_HEAD()}<h4>${title}</h4>
     <div>Bill #: <b>${sale.invoiceNumber}</b></div>
     <div>Date: ${new Date(sale.createdAt).toLocaleString()}</div>
     <div>Customer: ${sale.customerName || "Walk-in"}${sale.phone ? " (" + sale.phone + ")" : ""}</div>
@@ -59,13 +63,30 @@ function posBillHTML(sale, kind) {
     ${sale.tax ? `<tr><td>Tax (${sale.taxRate}%)</td><td class="r">रू ${sale.tax}</td></tr>` : ""}
     ${sale.service ? `<tr><td>Service (${sale.serviceRate}%)</td><td class="r">रू ${sale.service}</td></tr>` : ""}
     <tr><td class="tot">GRAND TOTAL</td><td class="r tot">रू ${sale.total}</td></tr>
-    <tr><td>Payment</td><td class="r">${(sale.paymentMethod || "cash").toUpperCase()}${sale.roomBill ? " · ROOM BILL" : ""}</td></tr>
+    <tr><td>Payment</td><td class="r">${payLine}${sale.roomBill ? " · ROOM BILL" : ""}</td></tr>
     </table><hr/>
     <div class="c">धन्यवाद! Thank you 🙏</div>
     <div class="c">Crafted by Dipendra Upadhayay (Rajbaar)</div>`;
 }
+/* kitchen token — only the food items on a POS sale */
+function posKotHTML(sale) {
+  const food = (sale.items || []).filter(i => i.kind === "food");
+  if (!food.length) return "";
+  const rows = food.map(i => `<tr><td>${i.name}</td><td class="r">${i.qty}</td></tr>`).join("");
+  return `${HOTEL_HEAD()}<h4>🍳 KITCHEN TOKEN (KOT)</h4>
+    <div>Bill #: <b>${sale.invoiceNumber}</b> · ${new Date(sale.createdAt).toLocaleTimeString()}</div>
+    ${sale.roomNumber ? `<div>Room: ${sale.roomNumber}</div>` : ""}<hr/>
+    <table><tr><th>Item</th><th class="r">Qty</th></tr>${rows}</table><hr/>
+    <div class="c">${sale.customerName || ""}</div>`;
+}
+/* print Customer + Reception (+ KOT if any food) in one go */
 function printPosAll(sale) {
-  printHTML([posBillHTML(sale, "cashier"), posBillHTML(sale, "customer")].join('<div style="page-break-after:always"></div>'));
+  const brk = '<div style="page-break-after:always"></div>';
+  const parts = [];
+  const kot = posKotHTML(sale);
+  if (kot) parts.push(kot);
+  parts.push(posBillHTML(sale, "customer"), posBillHTML(sale, "reception"));
+  printHTML(parts.join(brk));
 }
 
 /* =================== ADMIN: POS inventory =================== */
@@ -222,7 +243,8 @@ function PosPanel({ embedded }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [done, setDone] = useState(null);
-  if (!allowed) return null;
+  const [qr, setQr] = useState(null);
+  const [split, setSplit] = useState({ cash: "", online: "" });
 
   const money = n => "रू " + Number(n || 0).toLocaleString("en-IN");
   const posList = (products || []).filter(p => p.status === "active" && (cat === "all" || p.type === cat) &&
@@ -244,16 +266,47 @@ function PosPanel({ embedded }) {
   const tax = Math.round(taxed * (Number(taxRate) || 0)) / 100;
   const svc = Math.round(taxed * (Number(svcRate) || 0)) / 100;
   const total = Math.round((taxed + tax + svc) * 100) / 100;
+  useEffect(() => {
+    if (["qr", "esewa"].includes(pay) && total > 0) api("/public/qr?amount=" + total).then(setQr).catch(() => setQr(null));
+  }, [pay, total]);
+  if (!allowed) return null;
 
+  const cartItems = () => cart.map(c => c.kind === "food" ? { foodId: c.foodId, qty: c.qty } : { productId: c.productId, unitKey: c.unitKey, qty: c.qty });
+  const saleBody = extra => ({ items: cartItems(), paymentMethod: pay, discount: Number(disc) || 0, taxRate: Number(taxRate) || 0, serviceRate: Number(svcRate) || 0, roomId: toRoom ? roomId : "", addToRoomBill: toRoom && !!roomId, customerName: cust.name, phone: cust.phone, ...(extra || {}) });
+  const finishSale = async extra => {
+    const sale = await api("/pos/sales", { method: "POST", body: saleBody(extra) });
+    setDone(sale); setCart([]); setDisc(0); setToRoom(false); setRoomId(""); setCust({ name: "", phone: "" }); setSplit({ cash: "", online: "" }); setBusy(false);
+  };
   const sell = async () => {
     if (!cart.length) { setErr("Cart is empty."); return; }
-    setBusy(true); setErr("");
+    setErr(""); setBusy(true);
     try {
-      const items = cart.map(c => c.kind === "food" ? { foodId: c.foodId, qty: c.qty } : { productId: c.productId, unitKey: c.unitKey, qty: c.qty });
-      const sale = await api("/pos/sales", { method: "POST", body: { items, paymentMethod: pay, discount: Number(disc) || 0, taxRate: Number(taxRate) || 0, serviceRate: Number(svcRate) || 0, roomId: toRoom ? roomId : "", addToRoomBill: toRoom && !!roomId, customerName: cust.name, phone: cust.phone } });
-      setDone(sale); setCart([]); setDisc(0); setToRoom(false); setRoomId(""); setCust({ name: "", phone: "" });
-    } catch (e) { setErr(e.message); }
-    setBusy(false);
+      /* Razorpay → open the checkout modal, verify, then record the sale */
+      if (!toRoom && pay === "razorpay") {
+        const ready = await loadRazorpay();
+        if (!ready || !window.Razorpay) { setErr("Could not load Razorpay — check your connection."); setBusy(false); return; }
+        const o = await api("/pos/razorpay/order", { method: "POST", body: { items: cartItems(), discount: Number(disc) || 0, taxRate: Number(taxRate) || 0, serviceRate: Number(svcRate) || 0 } });
+        const rzp = new window.Razorpay({
+          key: o.keyId, amount: o.amount, currency: o.currency, order_id: o.orderId,
+          name: "Hotel Jai Laxmi and Lodge", description: "POS store payment",
+          image: Branding.logo || (location.origin + "/img/logo-small.jpg"),
+          prefill: { name: cust.name || "", contact: cust.phone || "" },
+          theme: { color: "#d4af37" },
+          handler: async function (resp) {
+            try {
+              const v = await api("/pos/razorpay/verify", { method: "POST", body: { razorpay_order_id: resp.razorpay_order_id, razorpay_payment_id: resp.razorpay_payment_id, razorpay_signature: resp.razorpay_signature } });
+              await finishSale({ razorpayPaymentId: v.razorpayPaymentId });
+            } catch (e) { setErr(e.message); setBusy(false); }
+          },
+          modal: { ondismiss: function () { setBusy(false); } }
+        });
+        rzp.on("payment.failed", function () { setErr("Payment failed — please try again."); setBusy(false); });
+        rzp.open();
+        return;
+      }
+      if (!toRoom && pay === "split") { await finishSale({ splitCash: Number(split.cash) || 0, splitOnline: Number(split.online) || 0 }); return; }
+      await finishSale();
+    } catch (e) { setErr(e.message); setBusy(false); }
   };
 
   const cats = [["all", "All"], ["cigarette", "🚬 Cigarettes"], ["alcohol", "🍾 Alcohol"], ["beverage", "🧃 Beverages"], ["food", "🍛 Restaurant"]];
@@ -307,9 +360,10 @@ function PosPanel({ embedded }) {
               <p style={{ fontSize: 34 }}>✅</p>
               <p><b className="gold">{done.invoiceNumber}</b> — {money(done.total)} {done.roomBill ? "· charged to room" : "· " + (done.paymentMethod || "").toUpperCase()}</p>
               <div className="flex mt" style={{ justifyContent: "center", flexWrap: "wrap", gap: 6 }}>
-                <button className="btn sm" onClick={() => printHTML(posBillHTML(done, "cashier"))}>🖨 Cashier Bill</button>
-                <button className="btn sm" onClick={() => printHTML(posBillHTML(done, "customer"))}>🖨 Customer Bill</button>
-                <button className="btn sm" onClick={() => printPosAll(done)}>🖨 Print All</button>
+                <button className="btn sm" onClick={() => printHTML(posBillHTML(done, "customer"))}>🧾 Customer</button>
+                <button className="btn sm ghost" onClick={() => printHTML(posBillHTML(done, "reception"))}>🛎 Reception</button>
+                {done.items.some(i => i.kind === "food") && <button className="btn sm ghost" onClick={() => printHTML(posKotHTML(done))}>🍳 KOT</button>}
+                <button className="btn" onClick={() => printPosAll(done)}>🖨 Print All-in-One</button>
               </div>
               <div className="flex mt" style={{ justifyContent: "center", gap: 6 }}>
                 <button className="btn sm ghost" onClick={() => downloadHTML(posBillHTML(done, "customer"), "bill-" + done.invoiceNumber + ".html")}>⬇ PDF/HTML</button>
@@ -346,10 +400,19 @@ function PosPanel({ embedded }) {
                 </div>
                 <label className="mt">Payment method</label>
                 <div className="flex" style={{ gap: 5, flexWrap: "wrap" }}>
-                  {["cash", "card", "upi", "qr", "wallet", "credit"].map(mth => (
-                    <button key={mth} className={"btn sm " + (pay === mth ? "" : "ghost")} onClick={() => setPay(mth)}>{mth.toUpperCase()}</button>
+                  {[["cash", "💵 Cash"], ["qr", "📱 QR"], ["esewa", "🟢 eSewa"], ["razorpay", "💳 Razorpay"], ["split", "🔀 Split"], ["credit", "💳 Credit"]].map(([mth, lb]) => (
+                    <button key={mth} className={"btn sm " + (pay === mth ? "" : "ghost")} onClick={() => setPay(mth)}>{lb}</button>
                   ))}
                 </div>
+                {["qr", "esewa"].includes(pay) && !toRoom && (qr
+                  ? <div className="qr-box" style={{ marginTop: 8 }}><PayQR payload={qr.payload} size={140} /><p style={{ fontSize: 12 }}>Scan to pay {money(total)}</p></div>
+                  : <p className="muted mt" style={{ fontSize: 12 }}>⚠ Set the payment QR in Admin → Payment / Bank.</p>)}
+                {pay === "split" && !toRoom && (
+                  <div className="row mt">
+                    <div><label>Cash part (रू)</label><input type="number" value={split.cash} onChange={e => setSplit({ ...split, cash: e.target.value })} placeholder="0" /></div>
+                    <div><label>Online part (रू)</label><input type="number" value={split.online} onChange={e => setSplit({ ...split, online: e.target.value })} placeholder="0" /></div>
+                  </div>
+                )}
                 {rooms && rooms.length > 0 && <React.Fragment>
                   <label className="mt"><input type="checkbox" checked={toRoom} onChange={e => setToRoom(e.target.checked)} /> Assign to room bill (pay at checkout)</label>
                   {toRoom && <select value={roomId} onChange={e => setRoomId(e.target.value)}>
@@ -359,7 +422,7 @@ function PosPanel({ embedded }) {
                 </React.Fragment>}
                 {err && <p className="red mt">⚠ {err}</p>}
                 <button className="btn lg mt" style={{ width: "100%" }} disabled={busy || (toRoom && !roomId)} onClick={sell}>
-                  {busy ? "Saving…" : toRoom ? "Charge to Room — " + money(total) : "Complete Sale — " + money(total)}
+                  {busy ? "Processing…" : toRoom ? "Charge to Room — " + money(total) : pay === "razorpay" ? "💳 Pay with Razorpay — " + money(total) : "Complete Sale — " + money(total)}
                 </button>
               </React.Fragment>}
             </React.Fragment>

@@ -1399,6 +1399,8 @@ app.post("/api/pos/sales", auth("admin", "reception", "pos"), (req, res) => {
     id: uid(), no: db.counters.posSale, invoiceNumber: "POS-" + String(db.counters.posInvoice).padStart(5, "0"),
     items: lines, subtotal, discount, taxRate, tax, serviceRate, service, total,
     paymentMethod: method, roomId: b.roomId || "", roomBill: !!b.addToRoomBill,
+    razorpayPaymentId: b.razorpayPaymentId || "",
+    splitCash: Number(b.splitCash) || 0, splitOnline: Number(b.splitOnline) || 0,
     customerName: b.customerName || "Walk-in", phone: b.phone || "",
     cashier: req.user.name, cashierId: req.user.id, createdAt: new Date().toISOString()
   };
@@ -1446,6 +1448,50 @@ app.get("/api/pos/report", auth("admin", "reception", "pos"), (req, res) => {
     lowStock: db.posProducts.filter(p => p.stockAlert > 0 && p.stock <= p.stockAlert && p.stock > 0).map(p => ({ name: p.name, stock: p.stock, alert: p.stockAlert, unit: p.baseUnit })),
     outOfStock: db.posProducts.filter(p => p.stock <= 0).map(p => ({ name: p.name }))
   });
+});
+
+/* recompute a POS cart total on the server (never trust the client amount) */
+function computePosTotal(body) {
+  const items = Array.isArray(body.items) ? body.items : [];
+  let subtotal = 0;
+  for (const it of items) {
+    if (it.foodId) { const m = db.menu.find(x => x.id === it.foodId); if (m) subtotal += Math.max(1, Number(it.qty) || 1) * m.price; }
+    else { const p = db.posProducts.find(x => x.id === it.productId); if (p) { const u = (p.units || []).find(x => x.key === it.unitKey); if (u) subtotal += Math.max(1, Number(it.qty) || 1) * u.price; } }
+  }
+  const discount = Math.max(0, Number(body.discount) || 0);
+  const taxed = Math.max(0, subtotal - discount);
+  const tax = Math.round(taxed * (Math.max(0, Number(body.taxRate) || 0))) / 100;
+  const service = Math.round(taxed * (Math.max(0, Number(body.serviceRate) || 0))) / 100;
+  return Math.round((taxed + tax + service) * 100) / 100;
+}
+/* POS Razorpay: create order for the POS cart, then verify the signature.
+   The actual sale (with stock deduction) is created via /api/pos/sales after
+   this verify returns ok. */
+app.post("/api/pos/razorpay/order", auth("admin", "reception", "pos"), async (req, res) => {
+  const cfg = razorpayCfg();
+  if (!cfg.enabled) return res.status(400).json({ error: "Razorpay is not configured (Admin → Payment/Bank)." });
+  const total = computePosTotal(req.body || {});
+  if (total <= 0) return res.status(400).json({ error: "Nothing to charge." });
+  const amountMinor = Math.round(total * 100);
+  const receipt = "POS-" + Date.now() + "-" + uid().slice(0, 6);
+  try {
+    const r = await fetch("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Basic " + Buffer.from(cfg.keyId + ":" + cfg.keySecret).toString("base64") },
+      body: JSON.stringify({ amount: amountMinor, currency: cfg.currency, receipt })
+    });
+    const order = await r.json();
+    if (!r.ok || !order.id) return res.status(502).json({ error: (order.error && order.error.description) || "Could not create the payment order." });
+    res.json({ orderId: order.id, amount: amountMinor, currency: cfg.currency, keyId: cfg.keyId });
+  } catch (e) { res.status(502).json({ error: "Could not reach the payment gateway." }); }
+});
+app.post("/api/pos/razorpay/verify", auth("admin", "reception", "pos"), (req, res) => {
+  const cfg = razorpayCfg();
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) return res.status(400).json({ error: "Missing payment fields" });
+  const expected = crypto.createHmac("sha256", cfg.keySecret).update(razorpay_order_id + "|" + razorpay_payment_id).digest("hex");
+  if (expected !== razorpay_signature) return res.status(400).json({ error: "Payment signature verification failed." });
+  res.json({ ok: true, razorpayPaymentId: razorpay_payment_id });
 });
 
 /* active rooms for the POS "assign to room" dropdown (safe subset) */
