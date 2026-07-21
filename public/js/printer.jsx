@@ -403,7 +403,8 @@ function PrinterModule({ area }) {
 }
 
 function PrinterDash({ onConnectBT, btName }) {
-  const stats = useLive(() => api("/printer-stats"), ["printers", "printJobs"]) || {
+  const [statsData] = useLive(() => api("/printer-stats"), ["printers", "printJobs"]);
+  const stats = statsData || {
     totalPrinters: 0, online: 0, offline: 0, printsToday: 0, printsMonth: 0, failed: 0, queueLength: 0, avgMs: 0
   };
 
@@ -446,7 +447,8 @@ function PrinterDash({ onConnectBT, btName }) {
 }
 
 function PrinterList({ canDelete, onConnectBT, btName }) {
-  const printers = useLive(() => api("/printers"), ["printers"]) || [];
+  const [printersData] = useLive(() => api("/printers"), ["printers"]);
+  const printers = Array.isArray(printersData) ? printersData : [];
   const [busy, setBusy] = useState("");
 
   const probe = async p => {
@@ -596,7 +598,8 @@ function PrinterAdd({ onDone, onConnectBT }) {
 }
 
 function PrintQueue() {
-  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]) || [];
+  const [jobsData] = useLive(() => api("/print-jobs"), ["printJobs"]);
+  const jobs = Array.isArray(jobsData) ? jobsData : [];
   const active = jobs.filter(j => ["pending", "printing"].includes(j.status));
   const failed = jobs.filter(j => j.status === "failed");
 
@@ -638,7 +641,8 @@ function PrintQueue() {
 }
 
 function PrintHistory({ canClear }) {
-  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]) || [];
+  const [jobsData] = useLive(() => api("/print-jobs"), ["printJobs"]);
+  const jobs = Array.isArray(jobsData) ? jobsData : [];
   const done = jobs.filter(j => ["completed", "failed", "cancelled"].includes(j.status));
   const clear = async () => {
     if (confirm("Clear completed print history?")) {

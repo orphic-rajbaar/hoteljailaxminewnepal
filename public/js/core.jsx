@@ -346,48 +346,61 @@ function _isMobile() {
   return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 }
 
-function printHTML(html) {
-  /* wrap bare snippet in a full print-ready document */
+function printHTML(html, opts) {
+  opts = opts || {};
+  const mobile = _isMobile();
+  /* Paper width: default 80mm receipt. Pass {paper:"58mm"|"A4"} to override. */
+  const paper = opts.paper || "80mm";
+  const width = paper === "58mm" ? "54mm" : paper === "A4" ? "190mm" : paper === "A5" ? "138mm" : "74mm";
+  const pageSize = /mm$/.test(paper) && paper !== "A5" ? (paper === "A4" ? "A4" : width + " auto") : (paper === "A5" ? "A5" : width + " auto");
+  /* wrap bare snippet in a full print-ready document.
+     KEY MOBILE FIX: print() is called EXACTLY ONCE (guarded), so the
+     safety-timeout can never fire a second print mid-render — that double
+     call is what makes Android Chrome hang on "Generating preview". A visible
+     Print button is shown as a manual fallback (hidden during actual print). */
   const fullDoc = `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Print</title><style>
-@page{margin:8mm}
+@page{size:${pageSize};margin:${/mm$/.test(paper) && paper !== "A4" && paper !== "A5" ? "2mm" : "8mm"}}
 *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+html,body{margin:0}
 body{font-family:'Courier New',monospace;font-size:12.5px;color:#000;
-     padding:8px;max-width:320px;margin:0 auto}
+     padding:6px;width:${width};margin:0 auto}
 h3,h4,.c{text-align:center;margin:2px 0}
 hr{border:none;border-top:1px dashed #555;margin:6px 0}
 table{width:100%;border-collapse:collapse}
 td,th{padding:3px 4px;text-align:left;font-size:12px}
 .r{text-align:right}.tot{font-weight:700;font-size:14px}
 img{max-width:100%}
-</style></head><body>${html}
+#pbar{position:sticky;top:0;display:flex;gap:8px;justify-content:center;padding:8px;background:#111;margin:-6px -6px 8px}
+#pbar button{flex:1;max-width:180px;padding:11px;border:0;border-radius:8px;font-size:15px;font-weight:700}
+#pbar .p{background:#16a34a;color:#fff}#pbar .x{background:#333;color:#fff}
+@media print{#pbar{display:none!important}}
+</style></head><body>
+<div id="pbar" class="no-print"><button class="p" onclick="doPrint()">🖨 Print / Save PDF</button><button class="x" onclick="window.close()">Close</button></div>
+${html}
 <script>
-/* auto-print as soon as images are ready (mobile Chrome compatible) */
-function tryPrint(){
+var _printed=false;
+function doPrint(){ if(_printed)return; _printed=true; try{window.focus();}catch(e){} window.print(); }
+function whenReady(){
   var imgs=document.images,n=imgs.length,done=0;
-  if(!n){window.print();return;}
-  function tick(){if(++done>=n)window.print();}
-  for(var i=0;i<n;i++){
-    if(imgs[i].complete)tick();
-    else{imgs[i].onload=tick;imgs[i].onerror=tick;}
-  }
-  setTimeout(window.print,800); /* safety fallback */
+  if(!n){doPrint();return;}
+  function tick(){if(++done>=n)doPrint();}
+  for(var i=0;i<n;i++){ if(imgs[i].complete)tick(); else{imgs[i].onload=tick;imgs[i].onerror=tick;} }
+  setTimeout(doPrint,1200); /* single guarded fallback — cannot double-fire */
 }
-if(document.readyState==='complete')tryPrint();
-else window.addEventListener('load',tryPrint);
+if(document.readyState==='complete')whenReady(); else window.addEventListener('load',whenReady);
 <\/script></body></html>`;
 
-  if (_isMobile()) {
-    /* Mobile / Android Chrome fix: open as blob URL in a new full tab.
-       This bypasses the "Generating preview" hang caused by iframe/popup
-       sandboxing on Android Chrome. */
+  if (mobile) {
+    /* Mobile / Android Chrome: open as a blob URL in a full tab. The guarded
+       single print() + manual button eliminates the "Generating preview" hang. */
     try {
       const blob = new Blob([fullDoc], { type: "text/html" });
       const url = URL.createObjectURL(blob);
       const tab = window.open(url, "_blank");
-      /* revoke after a generous delay so the tab has finished printing */
       if (tab) setTimeout(() => URL.revokeObjectURL(url), 60000);
+      else { alert("Please allow pop-ups for this site, then tap Print again."); }
       return;
     } catch (e) { /* fall through to popup on any error */ }
   }
