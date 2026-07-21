@@ -1,9 +1,4 @@
-# Hotel Jai Laxmi & Lodge - Docker Configuration
-# Node.js 22 Alpine — pinned to latest LTS digest to minimise CVEs
-# To get the latest digest, run: docker pull node:22-alpine && docker inspect node:22-alpine --format='{{index .RepoDigests 0}}'
-# Or check: https://hub.docker.com/_/node/tags?name=22-alpine
-
-FROM node:22-alpine@sha256:7f999971936c5188f6345ec46654b0366b5791321798317712d9196b01a07409
+FROM node:22-alpine
 
 # ── Security: upgrade ALL Alpine packages to their latest patched versions ──
 # This resolves the critical/high CVEs flagged by scanners (Trivy, Docker Scout, etc.)
