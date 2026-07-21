@@ -68,6 +68,7 @@ function AdminPanel() {
     { id: "branding", icon: "🎨", label: "Logo & Branding" },
     { id: "backup", icon: "💾", label: "Backup" },
     { id: "gcloud", icon: "☁️", label: "Google Cloud" },
+    { id: "printer", icon: "🖨️", label: "Printer" },
     { id: "reset", icon: "⚠️", label: "Factory Reset" }
   ];
   return (
@@ -95,6 +96,7 @@ function AdminPanel() {
       {tab === "branding" && <BrandingTab />}
       {tab === "backup" && <BackupTab />}
       {tab === "gcloud" && <GoogleCloudTab />}
+      {tab === "printer" && <PrinterModule area="admin" />}
       {tab === "reset" && <ResetTab />}
     </PanelShell>
   );

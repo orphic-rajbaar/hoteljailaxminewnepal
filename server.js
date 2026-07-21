@@ -6,6 +6,7 @@ const express = require("express");
 const http = require("http");
 const path = require("path");
 const fs = require("fs");
+const net = require("net");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
@@ -44,6 +45,12 @@ app.use(express.static(path.join(__dirname, "public")));
 /* ---------------- Database (JSON file) ---------------- */
 const DB_FILE = path.join(__dirname, "db.json");
 
+/* Google OAuth Web client ID for Sign-In. Used only to verify Google ID tokens
+   (aud check) — the client SECRET is NOT needed for this ID-token flow and is
+   never stored here. Admin can override this in Admin → Google Cloud. */
+const DEFAULT_GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID ||
+  "467733758072-23s3brbgjn0pitln1bi64orhcqqmf2pi.apps.googleusercontent.com";
+
 function freshDB() {
   return {
     secret: crypto.randomBytes(32).toString("hex"),
@@ -63,7 +70,7 @@ function freshDB() {
     payment: { accountName: "", accountNumber: "", apiKey: "", bankName: "",
       esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true,
       razorpayKeyId: "", razorpayKeySecret: "", razorpayEnabled: false, razorpayCurrency: "INR" },
-    google: { clientId: "", projectId: "", projectNumber: "", mapsApiKey: "" }, // Google Cloud config
+    google: { clientId: DEFAULT_GOOGLE_CLIENT_ID, projectId: "", projectNumber: "467733758072", mapsApiKey: "" }, // Google Cloud config
     smtp: { host: "", port: 587, user: "", pass: "", from: "" }, // email (login codes / notifications)
     branding: { logo: "", favicon: "" },
     content: defaultContent(),
@@ -72,7 +79,22 @@ function freshDB() {
     posProducts: [], // private POS store: cigarettes, alcohol, beverages
     posSales: [],    // private POS store sales
     tables: [],      // restaurant dine-in tables
+    printers: [],        // registered printers (wifi/lan/bluetooth/usb/pdf)
+    printJobs: [],       // print queue + history
+    printerSettings: defaultPrinterSettings(),
+    printerAudit: [],    // who added/removed/printed, when, from where
     counters: { order: 0, booking: 0, bill: 0, invoice: 0, posSale: 0, posInvoice: 0 }
+  };
+}
+
+/* default printer settings (global paper/receipt defaults) */
+function defaultPrinterSettings() {
+  return {
+    paperSize: "80mm", orientation: "portrait", density: "normal", fontSize: "normal",
+    marginTop: 0, marginBottom: 0, copies: 1, autoCut: true, cashDrawer: false,
+    logoPosition: "center", header: "", footer: "Thank you! Please visit again 🙏",
+    qrPosition: "bottom", barcodePosition: "none", watermark: "", darkPrint: false,
+    engine: "browser" // browser (hidden-iframe, works with any OS printer) | bluetooth | network
   };
 }
 
@@ -140,11 +162,15 @@ if (fs.existsSync(DB_FILE)) {
   if (db.payment.razorpayEnabled === undefined) db.payment.razorpayEnabled = false;
   if (db.payment.razorpayCurrency === undefined) db.payment.razorpayCurrency = "INR";
   db.google = db.google || {};
-  if (db.google.clientId === undefined) db.google.clientId = "";
+  if (!db.google.clientId) db.google.clientId = DEFAULT_GOOGLE_CLIENT_ID;
   if (db.google.projectId === undefined) db.google.projectId = "";
   if (db.google.projectNumber === undefined) db.google.projectNumber = "";
   if (db.google.mapsApiKey === undefined) db.google.mapsApiKey = "";
   db.smtp = db.smtp || { host: "", port: 587, user: "", pass: "", from: "" };
+  db.printers = db.printers || [];
+  db.printJobs = db.printJobs || [];
+  db.printerSettings = Object.assign(defaultPrinterSettings(), db.printerSettings || {});
+  db.printerAudit = db.printerAudit || [];
   ensureContentShape();
 } else {
   db = freshDB();
@@ -1621,6 +1647,199 @@ app.post("/api/tables/:id/settle", auth("admin", "reception", "pos"), (req, res)
   save(); changed("tables"); changed("orders");
   notify("table", "🍽️ Table Settled", `Table ${t.number} settled — ${open.length} order(s) · ${method}`, { tableId: t.id });
   res.json({ ok: true, settled: open.length });
+});
+
+/* ==================== PRINTER MANAGEMENT ====================
+   Honest architecture note: a web app served from a remote host cannot see a
+   client's local USB/Bluetooth/Wi-Fi printers. The three REAL print paths are:
+   1) Browser engine  — the client prints via a hidden iframe; the client OS
+      routes to ANY connected printer (USB / Wi-Fi / Bluetooth / network). Fast.
+   2) Web Bluetooth    — the browser pairs directly with a BT thermal printer
+      and streams ESC/POS bytes (handled client-side in printer.jsx).
+   3) Network ESC/POS  — this server opens a TCP socket to printerIP:9100 and
+      streams raw bytes. Works only when the server shares the printer's LAN.
+   The registry, queue, history, settings, stats and audit below are all real
+   and persisted in db.json. */
+
+function printAudit(req, action, printerName) {
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+    (req.socket && req.socket.remoteAddress) || "";
+  db.printerAudit.unshift({
+    id: uid(), action, printer: printerName || "",
+    user: (req.user && (req.user.name || req.user.email)) || "system",
+    ip, at: new Date().toISOString()
+  });
+  if (db.printerAudit.length > 2000) db.printerAudit.length = 2000;
+}
+
+const PRINTER_ROLES = auth("admin", "reception");
+
+/* ---- printer registry ---- */
+app.get("/api/printers", PRINTER_ROLES, (req, res) => res.json(db.printers));
+app.post("/api/printers", PRINTER_ROLES, (req, res) => {
+  const b = req.body || {};
+  const p = {
+    id: uid(),
+    name: String(b.name || "New Printer").trim(),
+    type: b.type || "thermal",           // thermal | laser | inkjet | kitchen | barcode | label | pdf
+    connection: b.connection || "wifi",  // wifi | lan | bluetooth | usb | pdf
+    ip: String(b.ip || "").trim(),
+    port: Number(b.port) || 9100,
+    location: String(b.location || "").trim(),
+    paperSize: b.paperSize || db.printerSettings.paperSize || "80mm",
+    favorite: !!b.favorite,
+    status: "unknown",                    // unknown | online | offline | error
+    lastSeen: "",
+    createdAt: new Date().toISOString()
+  };
+  db.printers.push(p);
+  printAudit(req, "add-printer", p.name);
+  save(); changed("printers"); res.json(p);
+});
+app.put("/api/printers/:id", PRINTER_ROLES, (req, res) => {
+  const p = db.printers.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Printer not found" });
+  ["name", "type", "connection", "ip", "location", "paperSize"].forEach(k => {
+    if (req.body[k] !== undefined) p[k] = typeof p[k] === "string" ? String(req.body[k]).trim() : req.body[k];
+  });
+  if (req.body.port !== undefined) p.port = Number(req.body.port) || 9100;
+  if (req.body.favorite !== undefined) p.favorite = !!req.body.favorite;
+  printAudit(req, "edit-printer", p.name);
+  save(); changed("printers"); res.json(p);
+});
+app.delete("/api/printers/:id", auth("admin"), (req, res) => {
+  const p = db.printers.find(x => x.id === req.params.id);
+  db.printers = db.printers.filter(x => x.id !== req.params.id);
+  printAudit(req, "remove-printer", p ? p.name : "");
+  save(); changed("printers"); res.json({ ok: true });
+});
+
+/* real TCP reachability probe for network/Wi-Fi/LAN printers (ip:port) */
+app.post("/api/printers/:id/probe", PRINTER_ROLES, (req, res) => {
+  const p = db.printers.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Printer not found" });
+  if (!p.ip) { p.status = "error"; save(); changed("printers"); return res.json({ reachable: false, reason: "No IP address set" }); }
+  const t0 = Date.now();
+  const sock = new net.Socket();
+  let done = false;
+  const finish = (reachable, reason) => {
+    if (done) return; done = true;
+    try { sock.destroy(); } catch (e) {}
+    p.status = reachable ? "online" : "offline";
+    p.lastSeen = reachable ? new Date().toISOString() : p.lastSeen;
+    save(); changed("printers");
+    res.json({ reachable, ms: Date.now() - t0, reason: reason || "" });
+  };
+  sock.setTimeout(2500);
+  sock.once("connect", () => finish(true));
+  sock.once("timeout", () => finish(false, "Timed out — printer not reachable from the server LAN"));
+  sock.once("error", e => finish(false, e.code || e.message));
+  sock.connect(p.port || 9100, p.ip);
+});
+
+/* send raw ESC/POS bytes to a network printer (server must share its LAN) */
+app.post("/api/printers/:id/escpos", PRINTER_ROLES, (req, res) => {
+  const p = db.printers.find(x => x.id === req.params.id);
+  if (!p) return res.status(404).json({ error: "Printer not found" });
+  if (!p.ip) return res.status(400).json({ error: "This printer has no IP — use the Browser or Bluetooth engine instead" });
+  const text = String((req.body && req.body.text) || "");
+  const ESC = "\x1b", GS = "\x1d";
+  const payload = ESC + "@" + text + "\n\n\n" + (db.printerSettings.autoCut ? GS + "V\x00" : "");
+  const t0 = Date.now();
+  const sock = new net.Socket();
+  let done = false;
+  const finish = (ok, err) => {
+    if (done) return; done = true;
+    try { sock.destroy(); } catch (e) {}
+    if (ok) { p.status = "online"; p.lastSeen = new Date().toISOString(); save(); changed("printers"); res.json({ ok: true, ms: Date.now() - t0 }); }
+    else { p.status = "error"; save(); changed("printers"); res.status(502).json({ error: err || "Print failed" }); }
+  };
+  sock.setTimeout(4000);
+  sock.once("timeout", () => finish(false, "Timed out"));
+  sock.once("error", e => finish(false, e.code || e.message));
+  sock.connect(p.port || 9100, p.ip, () => sock.write(Buffer.from(payload, "binary"), () => finish(true)));
+});
+
+/* ---- print queue + history ---- */
+app.get("/api/print-jobs", PRINTER_ROLES, (req, res) => res.json(db.printJobs.slice(0, 300)));
+app.post("/api/print-jobs", PRINTER_ROLES, (req, res) => {
+  const b = req.body || {};
+  const job = {
+    id: uid(),
+    doc: String(b.doc || "Document"),
+    printerId: b.printerId || "",
+    printerName: b.printerName || "Default (browser)",
+    copies: Number(b.copies) || 1,
+    priority: b.priority === "high" ? "high" : "normal",
+    status: "pending",                 // pending | printing | completed | failed | cancelled
+    user: (req.user && (req.user.name || req.user.email)) || "",
+    createdAt: new Date().toISOString(),
+    startedAt: "", finishedAt: "", durationMs: null, error: ""
+  };
+  db.printJobs.unshift(job);
+  if (db.printJobs.length > 1000) db.printJobs.length = 1000;
+  printAudit(req, "print", job.printerName + " · " + job.doc);
+  save(); changed("printJobs"); res.json(job);
+});
+/* client reports the outcome (with real measured duration) */
+app.post("/api/print-jobs/:id/done", PRINTER_ROLES, (req, res) => {
+  const j = db.printJobs.find(x => x.id === req.params.id);
+  if (!j) return res.status(404).json({ error: "Job not found" });
+  const ok = req.body && req.body.ok !== false;
+  j.status = ok ? "completed" : "failed";
+  j.startedAt = j.startedAt || j.createdAt;
+  j.finishedAt = new Date().toISOString();
+  j.durationMs = Number(req.body && req.body.ms) || j.durationMs;
+  j.error = ok ? "" : String((req.body && req.body.error) || "Print failed");
+  save(); changed("printJobs"); res.json(j);
+});
+app.post("/api/print-jobs/:id/cancel", PRINTER_ROLES, (req, res) => {
+  const j = db.printJobs.find(x => x.id === req.params.id);
+  if (!j) return res.status(404).json({ error: "Job not found" });
+  if (["completed"].includes(j.status)) return res.status(400).json({ error: "Already printed" });
+  j.status = "cancelled"; j.finishedAt = new Date().toISOString();
+  save(); changed("printJobs"); res.json(j);
+});
+app.post("/api/print-jobs/:id/retry", PRINTER_ROLES, (req, res) => {
+  const j = db.printJobs.find(x => x.id === req.params.id);
+  if (!j) return res.status(404).json({ error: "Job not found" });
+  j.status = "pending"; j.error = ""; j.startedAt = ""; j.finishedAt = ""; j.durationMs = null;
+  j.createdAt = new Date().toISOString();
+  save(); changed("printJobs"); res.json(j);
+});
+app.delete("/api/print-jobs", auth("admin"), (req, res) => {
+  const keep = req.query.keep === "active";
+  db.printJobs = keep ? db.printJobs.filter(j => ["pending", "printing"].includes(j.status)) : [];
+  save(); changed("printJobs"); res.json({ ok: true });
+});
+
+/* ---- settings ---- */
+app.get("/api/printer-settings", PRINTER_ROLES, (req, res) => res.json(db.printerSettings));
+app.put("/api/printer-settings", PRINTER_ROLES, (req, res) => {
+  db.printerSettings = Object.assign(defaultPrinterSettings(), db.printerSettings, req.body || {});
+  printAudit(req, "edit-settings", "");
+  save(); changed("printers"); res.json(db.printerSettings);
+});
+
+/* ---- audit log ---- */
+app.get("/api/printer-audit", auth("admin", "reception"), (req, res) => res.json(db.printerAudit.slice(0, 300)));
+
+/* ---- dashboard stats (real aggregates) ---- */
+app.get("/api/printer-stats", PRINTER_ROLES, (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const done = db.printJobs.filter(j => j.status === "completed");
+  const durations = done.map(j => j.durationMs).filter(n => typeof n === "number" && n > 0);
+  res.json({
+    totalPrinters: db.printers.length,
+    online: db.printers.filter(p => p.status === "online").length,
+    offline: db.printers.filter(p => p.status === "offline" || p.status === "error").length,
+    printsToday: db.printJobs.filter(j => j.status === "completed" && (j.finishedAt || "").slice(0, 10) === today).length,
+    printsMonth: db.printJobs.filter(j => j.status === "completed" && (j.finishedAt || "").slice(0, 7) === month).length,
+    failed: db.printJobs.filter(j => j.status === "failed").length,
+    queueLength: db.printJobs.filter(j => ["pending", "printing"].includes(j.status)).length,
+    avgMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0
+  });
 });
 
 /* ---------------- SPA fallback ---------------- */

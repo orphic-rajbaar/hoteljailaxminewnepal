@@ -2784,7 +2784,7 @@ function AccountPage() {
           <div><label>Age</label><input type="number" value={f.age} onChange={e => setF({ ...f, age: e.target.value })} placeholder="Age" /></div>
         </div>}
         <label style={{ textAlign: "left" }}>Password</label>
-        <input type="password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} placeholder="Choose a password" />
+        <PasswordInput value={f.password} onChange={e => setF({ ...f, password: e.target.value })} placeholder="Choose a password" autoComplete="new-password" />
         {err && <p className="red mt">⚠ {err}</p>}
         <button className="btn mt" style={{ width: "100%" }} disabled={busy}>{busy ? "Please wait…" : tab === "signup" ? "Create Account" : "Log In"}</button>
         <p className="muted mt" style={{ fontSize: 12 }}>Staff member? <a href="#/login">Staff login →</a></p>
@@ -2962,7 +2962,7 @@ function LoginPage() {
         <label style={{ textAlign: "left" }}>Email</label>
         <input type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} autoFocus />
         <label style={{ textAlign: "left" }}>Password</label>
-        <input type="password" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} />
+        <PasswordInput value={f.password} onChange={e => setF({ ...f, password: e.target.value })} placeholder="Staff password" />
         {err && <p className="red mt">⚠ {err}</p>}
         <button className="btn mt" style={{ width: "100%" }} disabled={busy}>{busy ? "Signing in…" : "Sign In"}</button>
       </form>

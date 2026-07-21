@@ -14,7 +14,8 @@ function ReceptionPanel() {
     { id: "verify", icon: "✅", label: "Verify & Bill" },
     { id: "reservations", icon: "🪑", label: "Reservations" },
     { id: "money", icon: "💰", label: "Income / Expense" },
-    { id: "credit", icon: "💳", label: "Credit" }
+    { id: "credit", icon: "💳", label: "Credit" },
+    { id: "printer", icon: "🖨️", label: "Printer" }
   ];
   return (
     <PanelShell area="reception" tabs={tabs} tab={tab} setTab={setTab}>
@@ -29,6 +30,7 @@ function ReceptionPanel() {
       {tab === "reservations" && <ReservationsTable />}
       {tab === "money" && <MoneyTab />}
       {tab === "credit" && <CreditTab />}
+      {tab === "printer" && <PrinterModule area="reception" />}
     </PanelShell>
   );
 }

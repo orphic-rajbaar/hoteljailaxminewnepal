@@ -311,19 +311,92 @@ function PhotoInput({ value, onChange, label: lbl, camera }) {
   );
 }
 
-/* ---------- printing ---------- */
+/* ---------- PasswordInput — show / hide toggle ---------- */
+function PasswordInput({ value, onChange, placeholder, id, autoComplete }) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="pw-wrap">
+      <input
+        id={id}
+        type={show ? "text" : "password"}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder || "Password"}
+        autoComplete={autoComplete || "current-password"}
+      />
+      <button
+        type="button"
+        className="pw-eye"
+        onClick={() => setShow(s => !s)}
+        aria-label={show ? "Hide password" : "Show password"}
+        tabIndex={-1}
+      >
+        {show ? "🙈" : "👁"}
+      </button>
+    </div>
+  );
+}
+
+/* ---------- printing — mobile-safe engine ----------
+   Android Chrome hangs on "Generating preview" when printing from a small
+   popup (the OS Chrome renderer refuses to show the dialog for tiny windows).
+   Fix: on mobile we write a full Blob URL and open it — Chrome then prints
+   it normally. On desktop the fast hidden-iframe path is used instead.      */
+function _isMobile() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
 function printHTML(html) {
-  const w = window.open("", "_blank", "width=420,height=640");
-  w.document.write(`<html><head><title>Print</title><style>
-    body{font-family:'Courier New',monospace;font-size:12.5px;color:#000;padding:10px;max-width:320px;margin:0 auto}
-    h3,h4,.c{text-align:center;margin:2px 0}
-    hr{border:none;border-top:1px dashed #555;margin:6px 0}
-    table{width:100%;border-collapse:collapse}
-    td,th{padding:3px 4px;text-align:left;font-size:12px}
-    .r{text-align:right}.tot{font-weight:700;font-size:14px}
-  </style></head><body>${html}</body></html>`);
+  /* wrap bare snippet in a full print-ready document */
+  const fullDoc = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Print</title><style>
+@page{margin:8mm}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:'Courier New',monospace;font-size:12.5px;color:#000;
+     padding:8px;max-width:320px;margin:0 auto}
+h3,h4,.c{text-align:center;margin:2px 0}
+hr{border:none;border-top:1px dashed #555;margin:6px 0}
+table{width:100%;border-collapse:collapse}
+td,th{padding:3px 4px;text-align:left;font-size:12px}
+.r{text-align:right}.tot{font-weight:700;font-size:14px}
+img{max-width:100%}
+</style></head><body>${html}
+<script>
+/* auto-print as soon as images are ready (mobile Chrome compatible) */
+function tryPrint(){
+  var imgs=document.images,n=imgs.length,done=0;
+  if(!n){window.print();return;}
+  function tick(){if(++done>=n)window.print();}
+  for(var i=0;i<n;i++){
+    if(imgs[i].complete)tick();
+    else{imgs[i].onload=tick;imgs[i].onerror=tick;}
+  }
+  setTimeout(window.print,800); /* safety fallback */
+}
+if(document.readyState==='complete')tryPrint();
+else window.addEventListener('load',tryPrint);
+<\/script></body></html>`;
+
+  if (_isMobile()) {
+    /* Mobile / Android Chrome fix: open as blob URL in a new full tab.
+       This bypasses the "Generating preview" hang caused by iframe/popup
+       sandboxing on Android Chrome. */
+    try {
+      const blob = new Blob([fullDoc], { type: "text/html" });
+      const url = URL.createObjectURL(blob);
+      const tab = window.open(url, "_blank");
+      /* revoke after a generous delay so the tab has finished printing */
+      if (tab) setTimeout(() => URL.revokeObjectURL(url), 60000);
+      return;
+    } catch (e) { /* fall through to popup on any error */ }
+  }
+
+  /* Desktop: classic fast popup (sub-second) */
+  const w = window.open("", "_blank", "width=480,height=680");
+  if (!w) { alert("Please allow popups for this site to enable printing."); return; }
+  w.document.write(fullDoc);
   w.document.close();
-  setTimeout(() => { w.print(); }, 350);
 }
 
 /* bill header with logo — logo works in the print window, in the downloaded

@@ -1,11 +1,18 @@
 # Hotel Jai Laxmi & Lodge - Docker Configuration
-# Node.js 22 Alpine (latest LTS — fewest known CVEs)
+# Node.js 22 Alpine — pinned to latest LTS digest to minimise CVEs
+# To get the latest digest, run: docker pull node:22-alpine && docker inspect node:22-alpine --format='{{index .RepoDigests 0}}'
+# Or check: https://hub.docker.com/_/node/tags?name=22-alpine
 
-FROM node:22-alpine
+FROM node:22-alpine@sha256:7f999971936c5188f6345ec46654b0366b5791321798317712d9196b01a07409
 
-# Install OS security patches on top of the base image
-# This clears the remaining high/critical Alpine CVEs in one step
-RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
+# ── Security: upgrade ALL Alpine packages to their latest patched versions ──
+# This resolves the critical/high CVEs flagged by scanners (Trivy, Docker Scout, etc.)
+# because the base image ships with packages that have known CVEs at build time.
+# Running apk upgrade here ensures every OS library is patched before the app runs.
+RUN apk update \
+ && apk upgrade --no-cache \
+ && apk add --no-cache tini \
+ && rm -rf /var/cache/apk/*
 
 # Run as non-root user for security (principle of least privilege)
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -34,6 +41,9 @@ EXPOSE 3000
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD node -e "require('http').get('http://localhost:3000/api/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"
+
+# Use tini as init to properly handle signals and reap zombie processes
+ENTRYPOINT ["/sbin/tini", "--"]
 
 # Start the app
 CMD ["node", "server.js"]
