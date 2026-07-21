@@ -1087,6 +1087,8 @@ function BackupTab() {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
+  const [summary] = useLive(() => api("/admin/data-summary"),
+    ["bookings", "orders", "rooms", "menu", "tables", "reservations", "gallery", "reviews", "pos", "inventory", "employees", "payments", "printers", "content", "credits"]);
   const download = async () => {
     setErr(""); setMsg(""); setBusy(true);
     try {
@@ -1107,7 +1109,11 @@ function BackupTab() {
       try { parsed = JSON.parse(r.result); } catch (x) { setErr("That file is not valid JSON."); return; }
       if (!confirm("Restore this backup? It REPLACES the current data with the backup's data.\nA safety snapshot of the current data is taken first.")) { if (fileRef.current) fileRef.current.value = ""; return; }
       setBusy(true);
-      try { const res = await api("/admin/restore", { method: "POST", body: { data: parsed } }); setMsg("✓ Restored — " + res.users + " accounts, " + res.bookings + " bookings, " + res.orders + " orders. You may need to log in again."); }
+      try {
+        const res = await api("/admin/restore", { method: "POST", body: { data: parsed } });
+        window.dispatchEvent(new Event("local-refresh"));
+        setMsg("✓ Restored live — " + res.rooms + " rooms · " + res.menu + " menu · " + res.tables + " tables · " + res.orders + " orders · " + res.bookings + " bookings · " + res.reservations + " reservations · " + res.posProducts + " POS items · " + res.inventory + " inventory · " + res.employees + " staff · " + res.payments + " payments · " + res.users + " accounts. Every panel is updated — no re-login needed.");
+      }
       catch (x) { setErr(x.message); }
       setBusy(false); if (fileRef.current) fileRef.current.value = "";
     };
@@ -1129,6 +1135,23 @@ function BackupTab() {
           <input ref={fileRef} type="file" accept="application/json,.json" onChange={restore} className="mt" />
           {err && <p className="red mt">⚠ {err}</p>}
         </div>
+      </div>
+
+      <div className="card mt">
+        <h4 className="gold mb">📦 What's inside this backup (live)</h4>
+        <p className="muted" style={{ marginTop: -4 }}>Every panel and all its history is included in the single backup file below. These counts update in real time.</p>
+        {!summary ? <div className="empty">Loading…</div> : (
+          <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10, marginTop: 10 }}>
+            {summary.sections.map(s => (
+              <div key={s.key} className="card" style={{ padding: "12px 12px", textAlign: "center", background: "rgba(255,255,255,0.02)" }}>
+                <div style={{ fontSize: 22 }}>{s.icon}</div>
+                <div className="gold" style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.2 }}>{s.count}</div>
+                <div className="muted" style={{ fontSize: 11.5 }}>{s.label}</div>
+                {s.extra && <div className="muted" style={{ fontSize: 10.5, opacity: 0.8 }}>+ {s.extra}</div>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div className="card mt">
         <h4 className="gold mb">How safe updates work</h4>

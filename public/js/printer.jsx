@@ -189,65 +189,134 @@ function sampleReceipt(s, kind) {
       <tr><td class="b">TOTAL PAID</td><td class="r b">Rs ${tot}</td></tr></table>`, { title: kind === "invoice" ? "Sample Invoice" : "Test Receipt" });
 }
 
-/* ---------- Web Bluetooth ESC/POS Engine ---------- */
-const BT = { device: null, characteristic: null, name: "" };
+/* ---------- Web Bluetooth ESC/POS Engine ----------
+   Reliable pairing for cheap 58mm/80mm BLE thermal printers. It tries the
+   known service→write-characteristic pairs used by ~all common modules first,
+   then falls back to scanning every service for any writable characteristic,
+   and finally VERIFIES the link by writing the ESC @ init byte — so we only
+   report "connected" when the printer actually accepts data. */
+const BT = { device: null, characteristic: null, name: "", connected: false };
+
+/* every BLE service UUID seen on common thermal printers — must be listed in
+   optionalServices or getPrimaryServices() can't see them. */
+const BT_SERVICES = [
+  0x18f0, 0xff00, 0xffe0, 0x1800, 0x1801, 0x180a,
+  "000018f0-0000-1000-8000-00805f9b34fb",
+  "0000ff00-0000-1000-8000-00805f9b34fb",
+  "0000ffe0-0000-1000-8000-00805f9b34fb",
+  "0000ffb0-0000-1000-8000-00805f9b34fb",
+  "49535343-fe7d-4ae5-8fa9-9fafd205e455", /* ISSC / Microchip — very common */
+  "e7810a71-73ae-499d-8c15-faa9aef0c3f2", /* Nordic-style */
+  "0000fee7-0000-1000-8000-00805f9b34fb",
+  "0000fff0-0000-1000-8000-00805f9b34fb"
+];
+/* preferred write characteristics per service (checked first, fastest path) */
+const BT_WRITE_CHARS = [
+  "00002af1-0000-1000-8000-00805f9b34fb",
+  "0000ff02-0000-1000-8000-00805f9b34fb",
+  "0000ffe1-0000-1000-8000-00805f9b34fb",
+  "0000ffb2-0000-1000-8000-00805f9b34fb",
+  "49535343-8841-43f4-a8d4-ecbe34729bb3", /* ISSC write */
+  "bef8d6c9-9c21-4c9e-b632-bd58c1009f9f",
+  "0000fee8-0000-1000-8000-00805f9b34fb",
+  "0000fff2-0000-1000-8000-00805f9b34fb"
+];
 
 function btSupported() {
   return !!(typeof navigator !== "undefined" && navigator.bluetooth && navigator.bluetooth.requestDevice);
 }
 
+async function _findWritable(server) {
+  const services = await server.getPrimaryServices();
+  /* 1) fast path: known service → known write characteristic */
+  for (const svc of services) {
+    let chars = [];
+    try { chars = await svc.getCharacteristics(); } catch (e) { continue; }
+    for (const pref of BT_WRITE_CHARS) {
+      const hit = chars.find(c => c.uuid === pref && (c.properties.write || c.properties.writeWithoutResponse));
+      if (hit) return hit;
+    }
+  }
+  /* 2) fallback: ANY writable characteristic on ANY service */
+  for (const svc of services) {
+    let chars = [];
+    try { chars = await svc.getCharacteristics(); } catch (e) { continue; }
+    const w = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+    if (w) return w;
+  }
+  return null;
+}
+
+async function _writeChunks(ch, bytes) {
+  for (let i = 0; i < bytes.length; i += 96) {
+    const chunk = bytes.slice(i, i + 96);
+    if (ch.writeValueWithoutResponse) { try { await ch.writeValueWithoutResponse(chunk); continue; } catch (e) {} }
+    await ch.writeValue(chunk);
+    await new Promise(r => setTimeout(r, 12)); /* let cheap BLE chips drain the buffer */
+  }
+}
+
 async function btConnect() {
-  if (!btSupported()) throw new Error("Web Bluetooth is not supported in this browser. Please use Chrome or Edge over HTTPS or localhost.");
-  
+  if (!btSupported())
+    throw new Error("Web Bluetooth needs Google Chrome (Android or desktop) on an HTTPS site. Safari/Firefox and http:// pages can't use it.");
+  if (typeof window !== "undefined" && window.isSecureContext === false)
+    throw new Error("Bluetooth is blocked because this page isn't secure (HTTPS). Open the site with https:// and try again.");
+
   const dev = await navigator.bluetooth.requestDevice({
     acceptAllDevices: true,
-    optionalServices: [
-      0x18f0, 0xff00, 0xffe0,
-      "000018f0-0000-1000-8000-00805f9b34fb",
-      "0000ffe0-0000-1000-8000-00805f9b34fb",
-      "0000ffe1-0000-1000-8000-00805f9b34fb",
-      "00001101-0000-1000-8000-00805f9b34fb"
-    ]
+    optionalServices: BT_SERVICES
   });
-
   if (!dev || !dev.gatt) throw new Error("No device selected.");
-  ptoast("Connecting…", "Connecting to " + (dev.name || "Bluetooth Printer"));
 
-  const server = await dev.gatt.connect();
-  const services = await server.getPrimaryServices();
-  let writableChar = null;
+  ptoast("Connecting…", "Pairing with " + (dev.name || "Bluetooth printer") + "…");
 
-  for (const svc of services) {
-    try {
-      const chars = await svc.getCharacteristics();
-      const w = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
-      if (w) { writableChar = w; break; }
-    } catch (e) {}
-  }
-
-  if (!writableChar) throw new Error("Paired, but no writable ESC/POS characteristic found on device.");
-
-  BT.device = dev;
-  BT.characteristic = writableChar;
-  BT.name = dev.name || "Bluetooth Thermal Printer";
-
-  // Register or update printer in backend list
+  /* auto-reconnect if the printer drops */
   try {
-    await api("/printers", {
-      method: "POST",
-      body: {
-        name: BT.name,
-        type: "thermal",
-        connection: "bluetooth",
-        paperSize: "80mm",
-        status: "online",
-        location: "Bluetooth Counter"
-      }
-    });
+    dev.removeEventListener && dev.removeEventListener("gattserverdisconnected", _onBtDrop);
+    dev.addEventListener("gattserverdisconnected", _onBtDrop);
   } catch (e) {}
 
-  ptoast("🟢 Bluetooth Connected", BT.name);
+  const server = await dev.gatt.connect();
+  const ch = await _findWritable(server);
+  if (!ch) { try { dev.gatt.disconnect(); } catch (e) {} throw new Error("Paired, but this device has no writable ESC/POS channel. Make sure it's a Bluetooth thermal printer (not just BT audio)."); }
+
+  /* VERIFY the link: send ESC @ (printer init). If this write throws, the
+     characteristic isn't really usable and we don't claim success. */
+  try { await _writeChunks(ch, new TextEncoder().encode("\x1b@")); }
+  catch (e) { try { dev.gatt.disconnect(); } catch (_) {} throw new Error("Connected but the printer refused data. Turn it off/on, keep it close, and try again."); }
+
+  BT.device = dev;
+  BT.characteristic = ch;
+  BT.name = dev.name || "Bluetooth Thermal Printer";
+  BT.connected = true;
+
+  /* register in the printer list ONCE (no duplicates on re-pair) */
+  try {
+    const existing = await api("/printers");
+    const dupe = Array.isArray(existing) && existing.find(p => p.connection === "bluetooth" && p.name === BT.name);
+    if (!dupe) await api("/printers", { method: "POST", body: { name: BT.name, type: "thermal", connection: "bluetooth", paperSize: "80mm", location: "Bluetooth counter" } });
+    if (dupe) await api("/printers/" + dupe.id + "/probe").catch(() => {});
+  } catch (e) {}
+
+  ptoast("🟢 Bluetooth Connected", BT.name + " · verified");
   return BT.name;
+}
+
+function _onBtDrop() {
+  BT.connected = false;
+  ptoast("🔌 Bluetooth disconnected", "The printer link dropped — tap Connect to re-pair.");
+}
+/* try to silently re-open the GATT link to the last device (used before printing) */
+async function btEnsure() {
+  if (BT.characteristic && BT.device && BT.device.gatt && BT.device.gatt.connected) return true;
+  if (BT.device && BT.device.gatt) {
+    try {
+      const server = await BT.device.gatt.connect();
+      const ch = await _findWritable(server);
+      if (ch) { BT.characteristic = ch; BT.connected = true; return true; }
+    } catch (e) {}
+  }
+  return false;
 }
 
 function htmlToEscPosText(html) {
@@ -268,23 +337,15 @@ function htmlToEscPosText(html) {
 }
 
 async function btPrintText(text) {
-  if (!BT.characteristic) throw new Error("Bluetooth printer is not connected. Click 'Connect Bluetooth' first.");
-  
-  const ESC = "\x1b", GS = "\x1d";
-  // ESC @ = Init, ESC a 1 = Center, GS V 0 = Paper Cut, ESC p = Cash Drawer
-  const cleanText = typeof text === "string" && text.includes("<") ? htmlToEscPosText(text) : text;
-  const raw = ESC + "@" + ESC + "a\x01" + cleanText + "\n\n\n" + GS + "V\x00";
-  const bytes = new TextEncoder().encode(raw);
+  if (!BT.characteristic) throw new Error("Bluetooth printer isn't connected. Tap 'Connect Bluetooth' first.");
+  const ok = await btEnsure();
+  if (!ok) throw new Error("Bluetooth link dropped — tap 'Connect Bluetooth' to re-pair.");
 
-  // Send in small 100-byte chunks for low-latency & stability across mobile Bluetooth chips
-  for (let i = 0; i < bytes.length; i += 100) {
-    const chunk = bytes.slice(i, i + 100);
-    if (BT.characteristic.writeValueWithoutResponse) {
-      await BT.characteristic.writeValueWithoutResponse(chunk);
-    } else {
-      await BT.characteristic.writeValue(chunk);
-    }
-  }
+  const ESC = "\x1b", GS = "\x1d";
+  // ESC @ = init, ESC a 1 = center, GS V 0 = full cut
+  const cleanText = typeof text === "string" && text.includes("<") ? htmlToEscPosText(text) : text;
+  const raw = ESC + "@" + ESC + "a\x01" + cleanText + "\n\n\n\n" + GS + "V\x00";
+  await _writeChunks(BT.characteristic, new TextEncoder().encode(raw));
 }
 
 /* ---------- Print Execution Controller ---------- */
@@ -345,11 +406,21 @@ function PrinterModule({ area }) {
   const [btDeviceName, setBtDeviceName] = useState(BT.name || "");
 
   const handleBTConnect = async () => {
+    /* Always give feedback — never leave the user with "nothing happened". */
+    if (!btSupported()) {
+      const why = (typeof window !== "undefined" && window.isSecureContext === false)
+        ? "This page isn't HTTPS. Open the site with https:// (e.g. https://hoteljailaxmi.com) and use Chrome."
+        : "Your browser can't use Bluetooth. Use Google Chrome on Android or desktop (not Safari/Firefox).";
+      ptoast("⚠️ Bluetooth unavailable", why);
+      return;
+    }
     try {
       const name = await btConnect();
       setBtDeviceName(name);
     } catch (e) {
-      ptoast("⚠️ Bluetooth Error", e.message);
+      /* user cancelling the chooser isn't an error */
+      if (/cancel|user gesture|chooser/i.test(e.message)) return;
+      ptoast("⚠️ Bluetooth error", e.message);
     }
   };
 
@@ -364,11 +435,9 @@ function PrinterModule({ area }) {
           <div className="pm-head-sub">Multi-connection printer routing · Bluetooth ESC/POS · Sub-second receipt printing</div>
         </div>
         <div className="pm-head-actions">
-          {btSupported() && (
-            <button className={"btn sm " + (btDeviceName ? "green" : "")} onClick={handleBTConnect}>
-              🔵 {btDeviceName ? "Bluetooth: " + btDeviceName : "Connect Bluetooth"}
-            </button>
-          )}
+          <button className={"btn sm " + (btDeviceName ? "green" : "")} onClick={handleBTConnect}>
+            🔵 {btDeviceName ? "Bluetooth: " + btDeviceName : "Connect Bluetooth"}
+          </button>
         </div>
       </div>
 

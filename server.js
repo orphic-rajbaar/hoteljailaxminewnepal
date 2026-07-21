@@ -111,6 +111,27 @@ function defaultContent() {
     celebrate: []   // { id, name, desc, photo }          — celebrate with us
   };
 }
+/* Guarantee every collection/section exists on the global db. Used at startup
+   AND after a backup restore, so an older or partial backup still shows every
+   panel (nothing is ever dropped — missing pieces are just created empty). */
+function ensureShape() {
+  const arr = ["users", "floors", "rooms", "bookings", "menu", "orders", "inventory",
+    "employees", "reservations", "gallery", "reviews", "transactions", "credits",
+    "payments", "auditLog", "posProducts", "posSales", "tables",
+    "printers", "printJobs", "printerAudit"];
+  for (const k of arr) if (!Array.isArray(db[k])) db[k] = [];
+  db.payment = Object.assign({ accountName: "", accountNumber: "", apiKey: "", bankName: "",
+    esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true,
+    razorpayKeyId: "", razorpayKeySecret: "", razorpayEnabled: false, razorpayCurrency: "INR" }, db.payment || {});
+  db.google = Object.assign({ clientId: DEFAULT_GOOGLE_CLIENT_ID, projectId: "", projectNumber: "467733758072", mapsApiKey: "" }, db.google || {});
+  if (!db.google.clientId) db.google.clientId = DEFAULT_GOOGLE_CLIENT_ID;
+  db.smtp = Object.assign({ host: "", port: 587, user: "", pass: "", from: "" }, db.smtp || {});
+  db.branding = Object.assign({ logo: "", favicon: "" }, db.branding || {});
+  db.printerSettings = Object.assign(defaultPrinterSettings(), db.printerSettings || {});
+  db.counters = Object.assign({ order: 0, booking: 0, bill: 0, invoice: 0, posSale: 0, posInvoice: 0 }, db.counters || {});
+  ensureContentShape();
+}
+
 function ensureContentShape() {
   const d = defaultContent();
   db.content = db.content || d;
@@ -837,6 +858,22 @@ app.post("/api/public/orders", (req, res) => {
   res.json(order);
 });
 
+/* an order still "occupies" a table while it is unpaid AND not completed/cancelled */
+function tableOpenOrders(tableId) {
+  return db.orders.filter(o => o.tableId === tableId && !o.paid && !["completed", "cancelled"].includes(o.status));
+}
+/* free a dine-in table automatically once every bill on it is paid/closed */
+function freeTableIfClear(tableId) {
+  if (!tableId) return false;
+  const t = db.tables.find(x => x.id === tableId);
+  if (!t) return false;
+  if (tableOpenOrders(tableId).length) return false; // still has an unpaid order
+  if (t.status === "available" && !t.currentName) return false;
+  t.status = "available"; t.currentName = ""; t.currentGuests = 0; t.seatedAt = "";
+  changed("tables");
+  return true;
+}
+
 function createOrder({ items, name, phone, table, tableId, paymentMethod, source, byUser }) {
   const lines = [];
   let total = 0;
@@ -849,6 +886,13 @@ function createOrder({ items, name, phone, table, tableId, paymentMethod, source
   }
   if (!lines.length) return { error: "No valid items in order" };
   const tbl = tableId ? db.tables.find(t => t.id === tableId) : null;
+  /* AUTO TABLE STATUS: a table is reserved/occupied from its first order until the
+     bill is fully paid. Block any new order on a table that still has an open bill. */
+  if (tbl) {
+    const open = tableOpenOrders(tbl.id);
+    if (open.length)
+      return { error: `Table ${tbl.number} is occupied — order #${open[0].no} is still unpaid. Settle & pay that bill before starting a new order.` };
+  }
   db.counters.order++;
   db.counters.bill++;
   const order = {
@@ -1021,6 +1065,12 @@ app.patch("/api/orders/:id", auth("admin", "reception", "kitchen", "waiter"), (r
     o.paid = !!req.body.paid;
     const t = db.transactions.find(t => t.refId === o.id);
     if (t) t.paid = o.paid;
+    /* AUTO TABLE STATUS: once this bill is paid and the table has no other open
+       bill, complete it and free the table automatically (no manual settle). */
+    if (o.paid && o.tableId) {
+      if (o.status !== "cancelled") o.status = "completed";
+      freeTableIfClear(o.tableId);
+    }
   }
   if (req.body.txnId !== undefined) o.txnId = req.body.txnId;
   if (req.body.verifiedBy !== undefined) { o.verifiedBy = req.body.verifiedBy; o.verifiedAt = new Date().toISOString(); }
@@ -1341,6 +1391,40 @@ app.get("/api/ai-report", auth("admin", "reception"), (req, res) => {
 });
 
 /* ---------------- Backup & Restore (admin) ---------------- */
+/* live summary of everything a backup contains — one row per panel/section */
+app.get("/api/admin/data-summary", auth("admin"), (req, res) => {
+  const n = a => Array.isArray(a) ? a.length : 0;
+  const content = db.content || {};
+  const contentItems = ["benefits", "amenities", "offers", "facilities", "chefs", "celebrate"]
+    .reduce((s, k) => s + n(content[k]), 0);
+  const online = m => ["online", "esewa", "razorpay", "khalti", "card", "wallet", "qr"].includes(String(m || "").toLowerCase());
+  res.json({
+    generatedAt: new Date().toISOString(),
+    sections: [
+      { key: "home", icon: "🏠", label: "Home / Dashboard content", count: contentItems + (content.home ? 1 : 0) },
+      { key: "rooms", icon: "🛏️", label: "Hotel rooms", count: n(db.rooms), extra: n(db.floors) + " floors" },
+      { key: "menu", icon: "🍽️", label: "Restaurant menu", count: n(db.menu) },
+      { key: "tables", icon: "🍽️", label: "Tables", count: n(db.tables) },
+      { key: "orders", icon: "🧾", label: "Orders", count: n(db.orders) },
+      { key: "bookings", icon: "📒", label: "Bookings", count: n(db.bookings) },
+      { key: "reservations", icon: "🪑", label: "Reservations", count: n(db.reservations) },
+      { key: "gallery", icon: "🖼️", label: "Gallery", count: n(db.gallery) },
+      { key: "reviews", icon: "⭐", label: "Reviews", count: n(db.reviews) },
+      { key: "posstore", icon: "🏪", label: "POS Store products", count: n(db.posProducts), extra: n(db.posSales) + " sales" },
+      { key: "inventory", icon: "📦", label: "Inventory", count: n(db.inventory) },
+      { key: "employees", icon: "👥", label: "Employees", count: n(db.employees) },
+      { key: "customers", icon: "🧑", label: "Customer accounts", count: n(db.users) },
+      { key: "credit", icon: "💳", label: "Credit records", count: n(db.credits) },
+      { key: "verify", icon: "✅", label: "Payments to verify", count: n((db.payments || []).filter(p => p.status === "pending")) },
+      { key: "payments", icon: "💰", label: "Payment transactions", count: n(db.payments) },
+      { key: "bank", icon: "🏦", label: "Payment / Bank config", count: db.payment ? 1 : 0 },
+      { key: "printer", icon: "🖨️", label: "Printers & print jobs", count: n(db.printers), extra: n(db.printJobs) + " jobs" },
+      { key: "transactions", icon: "📊", label: "Income / expense ledger", count: n(db.transactions) },
+      { key: "audit", icon: "🛡️", label: "Audit logs", count: n(db.auditLog) + n(db.printerAudit) }
+    ]
+  });
+});
+
 app.get("/api/admin/backup", auth("admin"), (req, res) => {
   res.setHeader("Content-Disposition", 'attachment; filename="hoteljailaxmi-backup-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + '.json"');
   res.setHeader("Content-Type", "application/json");
@@ -1348,21 +1432,24 @@ app.get("/api/admin/backup", auth("admin"), (req, res) => {
 });
 app.post("/api/admin/restore", auth("admin"), (req, res) => {
   const incoming = req.body && req.body.data;
-  if (!incoming || typeof incoming !== "object" || !Array.isArray(incoming.users) || !Array.isArray(incoming.bookings))
+  if (!incoming || typeof incoming !== "object" || !Array.isArray(incoming.users))
     return res.status(400).json({ error: "That doesn't look like a valid Hotel Jai Laxmi backup file." });
   backupDb(); // safety snapshot of the current data before we overwrite it
-  const keepSecret = db.secret;
+  const keepSecret = db.secret; // KEEP the current signing secret → your login stays valid (no forced logout)
   db = incoming;
-  db.secret = db.secret || keepSecret; // keep a signing secret so the app works
-  ensureAdmin();
-  ensureContentShape();
-  db.payments = db.payments || []; db.posProducts = db.posProducts || []; db.posSales = db.posSales || [];
-  db.tables = db.tables || []; db.auditLog = db.auditLog || []; db.google = db.google || {};
-  db.counters = db.counters || {};
+  db.secret = keepSecret || db.secret || crypto.randomBytes(32).toString("hex");
+  ensureShape();   // recreate every collection so all panels show, even from an old/partial backup
+  ensureAdmin();   // admin account always works after restore
   save();
-  io.emit("data-changed", { collection: "all" });
-  notify("system", "♻️ Data Restored", "The database was restored from a backup file by admin.", {});
-  res.json({ ok: true, users: db.users.length, bookings: db.bookings.length, orders: (db.orders || []).length });
+  io.emit("data-changed", { collection: "all" }); // every live view refreshes in real time
+  notify("system", "♻️ Data Restored", "The database was restored from a backup file by admin. All panels updated.", {});
+  const n = a => Array.isArray(a) ? a.length : 0;
+  res.json({
+    ok: true, users: n(db.users), bookings: n(db.bookings), orders: n(db.orders),
+    rooms: n(db.rooms), menu: n(db.menu), tables: n(db.tables), reservations: n(db.reservations),
+    gallery: n(db.gallery), reviews: n(db.reviews), posProducts: n(db.posProducts),
+    inventory: n(db.inventory), employees: n(db.employees), payments: n(db.payments), printers: n(db.printers)
+  });
 });
 
 /* ---------------- Factory reset ---------------- */

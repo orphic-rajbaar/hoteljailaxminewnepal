@@ -560,8 +560,11 @@ function TableDineIn({ table, orders, menu, onClose }) {
   const [pay, setPay] = useState("cash");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  /* STRICT one-order-per-table: once a table has an unpaid order it is locked —
+     no new KOTs can be added until the bill is paid and the table frees. */
+  const locked = orders.length > 0;
   const qtyOf = id => (cart.find(i => i.id === id) || {}).qty || 0;
-  const add = (m, d) => setCart(c => { const rest = c.filter(i => i.id !== m.id); const q = qtyOf(m.id) + d; return q > 0 ? [...rest, { id: m.id, foodName: m.foodName, price: m.price, qty: q }] : rest; });
+  const add = (m, d) => { if (locked) return; setCart(c => { const rest = c.filter(i => i.id !== m.id); const q = qtyOf(m.id) + d; return q > 0 ? [...rest, { id: m.id, foodName: m.foodName, price: m.price, qty: q }] : rest; }); };
   const priorBill = orders.reduce((s, o) => s + o.total, 0);
   const cartTotal = cart.reduce((s, i) => s + i.qty * i.price, 0);
   const grand = priorBill + cartTotal;
@@ -614,14 +617,18 @@ function TableDineIn({ table, orders, menu, onClose }) {
               {orders.map(o => <div key={o.id} className="flex spread"><span>KOT #{o.no} · {o.items.length} item(s)</span><b>{NPR(o.total)}</b></div>)}
             </div>
           )}
-          <div className="muted" style={{ fontSize: 12 }}>New items:</div>
-          {cart.length === 0 && <p className="muted">Tap dishes to add a new KOT.</p>}
-          {cart.map(i => (
-            <div className="line" key={i.id}><span>{i.foodName}</span><span className="flex" style={{ gap: 6 }}><button className="btn sm ghost" onClick={() => add(i, -1)}>−</button><b>{i.qty}</b><button className="btn sm ghost" onClick={() => add(i, 1)}>+</button></span><b>{NPR(i.qty * i.price)}</b></div>
-          ))}
+          {locked
+            ? <div className="mt" style={{ padding: 10, borderRadius: 8, background: "rgba(224,92,92,0.12)", border: "1px solid var(--red)", fontSize: 12.5 }}>🔒 <b>Table locked</b> — one order per table. Settle & pay the bill below to free the table before taking a new order.</div>
+            : <>
+                <div className="muted" style={{ fontSize: 12 }}>New items:</div>
+                {cart.length === 0 && <p className="muted">Tap dishes to add the order.</p>}
+                {cart.map(i => (
+                  <div className="line" key={i.id}><span>{i.foodName}</span><span className="flex" style={{ gap: 6 }}><button className="btn sm ghost" onClick={() => add(i, -1)}>−</button><b>{i.qty}</b><button className="btn sm ghost" onClick={() => add(i, 1)}>+</button></span><b>{NPR(i.qty * i.price)}</b></div>
+                ))}
+              </>}
           <div className="total"><span>Grand Total</span><span>{NPR(grand)}</span></div>
           {err && <p className="red mt">⚠ {err}</p>}
-          <button className="btn mt" style={{ width: "100%" }} disabled={busy || !cart.length} onClick={sendKOT}>🍳 Send KOT — {NPR(cartTotal)}</button>
+          {!locked && <button className="btn mt" style={{ width: "100%" }} disabled={busy || !cart.length} onClick={sendKOT}>🍳 Send KOT — {NPR(cartTotal)}</button>}
           <label className="mt">Settle payment method</label>
           <div className="flex" style={{ flexWrap: "wrap" }}>{["cash", "esewa", "qr", "card", "wallet", "credit"].map(m => <button key={m} className={"btn sm " + (pay === m ? "" : "ghost")} onClick={() => setPay(m)}>{m}</button>)}</div>
           <button className="btn green mt" style={{ width: "100%" }} disabled={busy || !orders.length} onClick={settle}>💰 Settle & Free Table — {NPR(priorBill)}</button>
