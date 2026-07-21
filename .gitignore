@@ -5,10 +5,15 @@ node_modules/
 # hashes, so it must NEVER be committed to a public repo. The server creates a
 # fresh db.json automatically on first run.
 db.json
+# automatic timestamped database backups (server keeps the last 40)
+backups/
 
 # environment secrets
 .env
 .env.local
+# Google OAuth client files (contain the client secret)
+hotel client.json
+client_secret*.json
 
 # logs & OS files
 *.log

@@ -2629,6 +2629,44 @@ function PaymentFailed() {
   );
 }
 
+/* "Continue with Google" — renders only when the admin has configured a Client ID */
+function GoogleLoginBtn({ onDone, setErr }) {
+  const ref = useRef(null);
+  const [cfg, setCfg] = useState(null);
+  useEffect(() => { api("/public/google").then(setCfg).catch(() => setCfg({ clientId: "" })); }, []);
+  useEffect(() => {
+    if (!cfg || !cfg.clientId || !ref.current) return;
+    const init = () => {
+      if (!window.google || !window.google.accounts || !ref.current) return;
+      window.google.accounts.id.initialize({
+        client_id: cfg.clientId,
+        callback: async resp => {
+          try {
+            const r = await api("/public/google-login", { method: "POST", body: { credential: resp.credential } });
+            Auth.set(r.token, r.user);
+            window.dispatchEvent(new Event("auth-changed"));
+            if (onDone) onDone();
+          } catch (e) { if (setErr) setErr(e.message); }
+        }
+      });
+      window.google.accounts.id.renderButton(ref.current, { theme: "outline", size: "large", shape: "pill", width: 280 });
+    };
+    if (window.google && window.google.accounts) init();
+    else {
+      const s = document.createElement("script");
+      s.src = "https://accounts.google.com/gsi/client"; s.async = true; s.onload = init;
+      document.body.appendChild(s);
+    }
+  }, [cfg]);
+  if (!cfg || !cfg.clientId) return null;
+  return (
+    <div>
+      <div ref={ref} style={{ display: "flex", justifyContent: "center", margin: "10px 0 4px" }} />
+      <p className="muted" style={{ fontSize: 11.5, textAlign: "center" }}>— or use email below —</p>
+    </div>
+  );
+}
+
 /* ---------------- CUSTOMER ACCOUNT (public login / signup) ---------------- */
 function AccountPage() {
   const [tab, setTab] = useState("signin");
@@ -2684,6 +2722,7 @@ function AccountPage() {
           <button type="button" className={"chip" + (tab === "signin" ? " on" : "")} onClick={() => { setTab("signin"); setErr(""); }}>Log In</button>
           <button type="button" className={"chip" + (tab === "signup" ? " on" : "")} onClick={() => { setTab("signup"); setErr(""); }}>Sign Up</button>
         </div>
+        <GoogleLoginBtn onDone={() => go("/account")} setErr={setErr} />
         {tab === "signup" && <>
           <div className="flex" style={{ justifyContent: "center", alignItems: "center", gap: 12, margin: "4px 0 8px" }}>
             {f.photo && <img src={f.photo} alt="profile" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--gold-dim)" }} />}

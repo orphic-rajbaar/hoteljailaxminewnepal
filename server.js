@@ -11,6 +11,19 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const { Server } = require("socket.io");
 
+/* minimal .env loader (no external dependency) — loads KEY=VALUE lines from a
+   local .env into process.env if not already set. Keeps secrets out of source. */
+(function loadDotEnv() {
+  try {
+    const p = path.join(__dirname, ".env");
+    if (!fs.existsSync(p)) return;
+    for (const line of fs.readFileSync(p, "utf8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$/);
+      if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+    }
+  } catch (e) { /* ignore */ }
+})();
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -46,6 +59,7 @@ function freshDB() {
     payment: { accountName: "", accountNumber: "", apiKey: "", bankName: "",
       esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true,
       razorpayKeyId: "", razorpayKeySecret: "", razorpayEnabled: false, razorpayCurrency: "INR" },
+    google: { clientId: "", projectId: "", projectNumber: "", mapsApiKey: "" }, // Google Cloud config
     branding: { logo: "", favicon: "" },
     content: defaultContent(),
     payments: [],   // eSewa & other payment transactions
@@ -79,9 +93,26 @@ function ensureContentShape() {
     if (!Array.isArray(db.content[k])) db.content[k] = [];
 }
 
+/* ---------- automatic backups (zero-data-loss deploys) ----------
+   Copies the current db.json into ./backups/ before the new code touches it,
+   and keeps the most recent 40. This runs on every server start, so every
+   deploy/restart snapshots your data first. */
+function backupDb() {
+  try {
+    if (!fs.existsSync(DB_FILE)) return;
+    const dir = path.join(__dirname, "backups");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    fs.copyFileSync(DB_FILE, path.join(dir, "db-" + stamp + ".json"));
+    const files = fs.readdirSync(dir).filter(f => /^db-.*\.json$/.test(f)).sort();
+    while (files.length > 40) { try { fs.unlinkSync(path.join(dir, files.shift())); } catch (e) {} }
+  } catch (e) { console.log("[backup] skipped:", e.message); }
+}
+
 let db;
 if (fs.existsSync(DB_FILE)) {
   db = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
+  backupDb(); // snapshot the existing data before any migration writes
   db.reservations = db.reservations || []; // migration for older db files
   db.branding = db.branding || { logo: "", favicon: "" };
   db.gallery = db.gallery || [];
@@ -103,6 +134,11 @@ if (fs.existsSync(DB_FILE)) {
   if (db.payment.razorpayKeySecret === undefined) db.payment.razorpayKeySecret = "";
   if (db.payment.razorpayEnabled === undefined) db.payment.razorpayEnabled = false;
   if (db.payment.razorpayCurrency === undefined) db.payment.razorpayCurrency = "INR";
+  db.google = db.google || {};
+  if (db.google.clientId === undefined) db.google.clientId = "";
+  if (db.google.projectId === undefined) db.google.projectId = "";
+  if (db.google.projectNumber === undefined) db.google.projectNumber = "";
+  if (db.google.mapsApiKey === undefined) db.google.mapsApiKey = "";
   ensureContentShape();
 } else {
   db = freshDB();
@@ -214,6 +250,58 @@ app.post("/api/public/signin", (req, res) => {
     return res.status(401).json({ error: "Invalid email or password" });
   res.json({ token: sign(user), user: publicUser(user) });
 });
+/* ---------------- Google Sign-In (customers) ----------------
+   The browser gets an ID token from Google Identity Services; we verify it
+   server-side against Google's tokeninfo endpoint and check the audience
+   matches our OAuth Client ID before issuing our own JWT. */
+app.get("/api/public/google", (req, res) => {
+  const g = db.google || {};
+  /* clientId + Maps browser key are safe for the frontend (Maps keys are
+     restricted by HTTP referrer in the Google console, not kept secret). */
+  res.json({
+    clientId: g.clientId || process.env.GOOGLE_CLIENT_ID || "",
+    projectId: g.projectId || process.env.GOOGLE_PROJECT_ID || "",
+    projectNumber: g.projectNumber || "",
+    mapsApiKey: g.mapsApiKey || process.env.GOOGLE_MAPS_API_KEY || ""
+  });
+});
+app.put("/api/google", auth("admin"), (req, res) => {
+  db.google = db.google || {};
+  ["clientId", "projectId", "projectNumber", "mapsApiKey"].forEach(k => {
+    if (req.body[k] !== undefined) db.google[k] = String(req.body[k]).trim();
+  });
+  save(); changed("google"); res.json(db.google);
+});
+app.post("/api/public/google-login", async (req, res) => {
+  const { credential } = req.body || {};
+  if (!credential) return res.status(400).json({ error: "Missing Google credential" });
+  const clientId = (db.google || {}).clientId || process.env.GOOGLE_CLIENT_ID || "";
+  if (!clientId) return res.status(400).json({ error: "Google login is not configured yet" });
+  try {
+    const r = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(credential));
+    const info = await r.json();
+    if (!r.ok || info.aud !== clientId || !info.email)
+      return res.status(401).json({ error: "Google sign-in could not be verified" });
+    let user = db.users.find(u => (u.email || "").toLowerCase() === String(info.email).toLowerCase());
+    if (!user) {
+      user = {
+        id: uid(), name: info.name || info.email.split("@")[0], email: info.email,
+        phone: "", age: null, photo: info.picture || "",
+        passwordHash: bcrypt.hashSync(uid() + Date.now(), 10), // random — Google users log in via Google
+        role: "customer", access: [], googleSub: info.sub, createdAt: new Date().toISOString()
+      };
+      db.users.push(user); save();
+    } else if (!user.googleSub) {
+      user.googleSub = info.sub;
+      if (!user.photo && info.picture) user.photo = info.picture;
+      save();
+    }
+    res.json({ token: sign(user), user: publicUser(user) });
+  } catch (e) {
+    res.status(502).json({ error: "Could not verify with Google — try again" });
+  }
+});
+
 /* a logged-in customer's own booking + order history (matched by phone) */
 app.get("/api/public/my-history", auth(), (req, res) => {
   const u = req.user;
@@ -427,10 +515,13 @@ app.get("/api/public/payment/:id", (req, res) => {
    to the frontend and never logged. */
 function razorpayCfg() {
   const p = db.payment || {};
+  const keyId = p.razorpayKeyId || process.env.RAZORPAY_KEY_ID || "";
+  const keySecret = p.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET || "";
+  const envKeys = !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
   return {
-    enabled: p.razorpayEnabled === true,
-    keyId: p.razorpayKeyId || process.env.RAZORPAY_KEY_ID || "",
-    keySecret: p.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET || "",
+    /* on when the admin enabled it, or when server env keys are provided */
+    enabled: (p.razorpayEnabled === true || envKeys) && !!keyId && !!keySecret,
+    keyId, keySecret,
     currency: p.razorpayCurrency || "INR"
   };
 }
@@ -1153,6 +1244,31 @@ app.get("/api/ai-report", auth("admin", "reception"), (req, res) => {
       (topDishes.length ? `, and your best seller is ${topDishes[0][0]}.` : "."),
     insights: ins
   });
+});
+
+/* ---------------- Backup & Restore (admin) ---------------- */
+app.get("/api/admin/backup", auth("admin"), (req, res) => {
+  res.setHeader("Content-Disposition", 'attachment; filename="hoteljailaxmi-backup-' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-") + '.json"');
+  res.setHeader("Content-Type", "application/json");
+  res.send(JSON.stringify(db, null, 2));
+});
+app.post("/api/admin/restore", auth("admin"), (req, res) => {
+  const incoming = req.body && req.body.data;
+  if (!incoming || typeof incoming !== "object" || !Array.isArray(incoming.users) || !Array.isArray(incoming.bookings))
+    return res.status(400).json({ error: "That doesn't look like a valid Hotel Jai Laxmi backup file." });
+  backupDb(); // safety snapshot of the current data before we overwrite it
+  const keepSecret = db.secret;
+  db = incoming;
+  db.secret = db.secret || keepSecret; // keep a signing secret so the app works
+  ensureAdmin();
+  ensureContentShape();
+  db.payments = db.payments || []; db.posProducts = db.posProducts || []; db.posSales = db.posSales || [];
+  db.tables = db.tables || []; db.auditLog = db.auditLog || []; db.google = db.google || {};
+  db.counters = db.counters || {};
+  save();
+  io.emit("data-changed", { collection: "all" });
+  notify("system", "♻️ Data Restored", "The database was restored from a backup file by admin.", {});
+  res.json({ ok: true, users: db.users.length, bookings: db.bookings.length, orders: (db.orders || []).length });
 });
 
 /* ---------------- Factory reset ---------------- */

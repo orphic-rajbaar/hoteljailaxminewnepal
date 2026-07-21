@@ -66,6 +66,8 @@ function AdminPanel() {
     { id: "payments", icon: "💰", label: "Payments" },
     { id: "payment", icon: "🏦", label: "Payment / Bank" },
     { id: "branding", icon: "🎨", label: "Logo & Branding" },
+    { id: "backup", icon: "💾", label: "Backup" },
+    { id: "gcloud", icon: "☁️", label: "Google Cloud" },
     { id: "reset", icon: "⚠️", label: "Factory Reset" }
   ];
   return (
@@ -91,6 +93,8 @@ function AdminPanel() {
       {tab === "payments" && <PaymentsTab />}
       {tab === "payment" && <PaymentTab />}
       {tab === "branding" && <BrandingTab />}
+      {tab === "backup" && <BackupTab />}
+      {tab === "gcloud" && <GoogleCloudTab />}
       {tab === "reset" && <ResetTab />}
     </PanelShell>
   );
@@ -998,6 +1002,213 @@ function PaymentTab() {
           {String(p.razorpayKeyId || "").startsWith("rzp_live") ? "⚠ LIVE keys — real money will be charged." : "🧪 Use rzp_test_ keys to test safely; rzp_live_ keys charge real money."}
         </p>
         <button className="btn mt" onClick={save}>{saved ? "✓ Saved!" : "Save Razorpay"}</button>
+      </div>
+
+      <GoogleAuthCard />
+    </div>
+  );
+}
+
+/* Google Sign-In configuration (customers log in with their Google account) */
+function GoogleAuthCard() {
+  const [g, setG] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { api("/public/google").then(setG).catch(() => setG({ clientId: "" })); }, []);
+  if (!g) return null;
+  const save = async () => {
+    setErr("");
+    try { await api("/google", { method: "PUT", body: { clientId: g.clientId } }); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+        <h4 className="gold" style={{ margin: 0 }}>🔐 Google Login (Sign in with Google)</h4>
+        <span className={"pill " + (g.clientId ? "p-ready" : "p-cancelled")}>{g.clientId ? "Configured" : "Not set"}</span>
+      </div>
+      <p className="muted" style={{ marginTop: -4 }}>
+        Lets customers sign in with one tap using their Google account. In your Google Cloud project
+        open <b>APIs &amp; Services → Credentials → Create credentials → OAuth client ID → Web application</b>,
+        add your site (e.g. https://hoteljailaxmi.com and http://localhost:3000) to <b>Authorized JavaScript origins</b>,
+        then paste the Client ID here. It looks like <i>467733758072-xxxxxxxx.apps.googleusercontent.com</i>.
+      </p>
+      <label>OAuth Client ID</label>
+      <input value={g.clientId || ""} onChange={e => setG({ ...g, clientId: e.target.value })} placeholder="467733758072-xxxxxxxx.apps.googleusercontent.com" />
+      {err && <p className="red mt">⚠ {err}</p>}
+      <button className="btn mt" onClick={save}>{saved ? "✓ Saved & live!" : "Save Google Login"}</button>
+    </div>
+  );
+}
+
+/* ============ BACKUP & RESTORE (zero-data-loss deploys) ============ */
+function BackupTab() {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const fileRef = useRef(null);
+  const download = async () => {
+    setErr(""); setMsg(""); setBusy(true);
+    try {
+      const data = await api("/admin/backup");
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+      a.download = "hoteljailaxmi-backup-" + new Date().toISOString().slice(0, 10) + ".json"; a.click();
+      setMsg("✓ Backup downloaded. Keep it somewhere safe.");
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  const restore = e => {
+    setErr(""); setMsg("");
+    const f = e.target.files[0]; if (!f) return;
+    const r = new FileReader();
+    r.onload = async () => {
+      let parsed;
+      try { parsed = JSON.parse(r.result); } catch (x) { setErr("That file is not valid JSON."); return; }
+      if (!confirm("Restore this backup? It REPLACES the current data with the backup's data.\nA safety snapshot of the current data is taken first.")) { if (fileRef.current) fileRef.current.value = ""; return; }
+      setBusy(true);
+      try { const res = await api("/admin/restore", { method: "POST", body: { data: parsed } }); setMsg("✓ Restored — " + res.users + " accounts, " + res.bookings + " bookings, " + res.orders + " orders. You may need to log in again."); }
+      catch (x) { setErr(x.message); }
+      setBusy(false); if (fileRef.current) fileRef.current.value = "";
+    };
+    r.readAsText(f);
+  };
+  return (
+    <div>
+      <PageHead t="💾 Backup & Restore" s="Download a full copy of all your data, or restore from a backup — the server also auto-backs-up on every restart." />
+      <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 18, alignItems: "start" }}>
+        <div className="card">
+          <h4 className="gold mb">⬇ Download full backup</h4>
+          <p className="muted">One file with everything — hotel info, rooms &amp; images, bookings, customers, staff, payments, invoices, menu, orders, POS, reviews, settings, audit logs. Do this before every deploy.</p>
+          <button className="btn mt" onClick={download} disabled={busy}>{busy ? "Working…" : "⬇ Download Backup (.json)"}</button>
+          {msg && <p className="green mt">{msg}</p>}
+        </div>
+        <div className="card">
+          <h4 className="gold mb">♻ Restore from backup</h4>
+          <p className="muted">Upload a backup file to replace the current data (a safety snapshot is taken first). Use this only to recover after data loss.</p>
+          <input ref={fileRef} type="file" accept="application/json,.json" onChange={restore} className="mt" />
+          {err && <p className="red mt">⚠ {err}</p>}
+        </div>
+      </div>
+      <div className="card mt">
+        <h4 className="gold mb">How safe updates work</h4>
+        <p className="muted" style={{ lineHeight: 1.9 }}>
+          Your entire database (all records <b>and images</b>) is the file <b>db.json</b>. It is <b>git-ignored</b>, so pulling code from GitHub never changes it.
+          On every server start the app copies it into a <b>backups/</b> folder (keeps the last 40). New code only <b>adds</b> new fields/tables to your existing data — it never deletes records or changes your booking / invoice / payment / room IDs.
+          Safe update: Download a backup here → deploy the code only (never overwrite db.json) → restart. Full steps are in <b>DEPLOY-UPDATE.md</b>.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ============ GOOGLE CLOUD CONSOLE (launch + configure) ============
+   Honest hub: deep-links straight into your real Google Cloud Console for each
+   service (no fake dashboards), plus editable storage for the config THIS app
+   actually uses — Project ID/Number, Maps API key, OAuth Client ID. */
+const GCP_SECTIONS = [
+  ["dashboard", "📊", "Dashboard", "", "Your Google Cloud setup at a glance — keys, status and quick links."],
+  ["projects", "📁", "Projects", "cloud-resource-manager", "Create, view and manage Google Cloud projects."],
+  ["billing", "💰", "Billing", "billing", "Billing accounts, budgets, invoices and cost reports."],
+  ["iam", "🔑", "IAM & Admin", "iam-admin/iam", "Users, roles, permissions and service accounts."],
+  ["apis", "🧩", "APIs & Services", "apis/dashboard", "Enable & monitor Google APIs (Maps, BigQuery…)."],
+  ["oauth", "🪪", "OAuth Consent", "apis/credentials/consent", "App name, logo, scopes and authorized domains."],
+  ["credentials", "🗝️", "Credentials", "apis/credentials", "API keys, OAuth client IDs and service accounts."],
+  ["secrets", "🔒", "Secret Manager", "security/secret-manager", "Store API keys, passwords and secrets securely."],
+  ["compute", "🖥️", "Compute Engine", "compute/instances", "Virtual machines, disks, snapshots, SSH."],
+  ["gke", "☸️", "Kubernetes (GKE)", "kubernetes/list", "Clusters, nodes and containerized workloads."],
+  ["run", "🏃", "Cloud Run", "run", "Serverless containers and services."],
+  ["functions", "⚡", "Cloud Functions", "functions/list", "Event-driven serverless functions."],
+  ["bigquery", "📈", "BigQuery", "bigquery", "Data warehouse, datasets and SQL analytics."],
+  ["sql", "🗄️", "Cloud SQL", "sql/instances", "Managed MySQL / PostgreSQL / SQL Server."],
+  ["firestore", "🔥", "Firestore", "firestore", "NoSQL document database."],
+  ["storage", "📦", "Cloud Storage", "storage/browser", "Buckets for photos, IDs, invoices and media."],
+  ["networking", "🌐", "Networking", "networking", "VPC, firewall, load balancers, Cloud NAT."],
+  ["dns", "🧭", "Cloud DNS", "net-services/dns/zones", "Manage DNS zones and records."],
+  ["pubsub", "📨", "Pub/Sub", "cloudpubsub", "Messaging between services."],
+  ["scheduler", "⏰", "Cloud Scheduler", "cloudscheduler", "Cron jobs and scheduled tasks."],
+  ["logging", "📜", "Logging", "logs", "Application, API, auth and audit logs."],
+  ["monitoring", "💓", "Monitoring", "monitoring", "CPU, memory, uptime, alerts and dashboards."],
+  ["security", "🛡️", "Security Center", "security/command-center", "Threats, vulnerabilities and security score."],
+  ["build", "🏗️", "Cloud Build", "cloud-build", "CI/CD build pipelines."],
+  ["artifacts", "📚", "Artifact Registry", "artifacts", "Container images and packages."],
+  ["vertex", "🤖", "Vertex AI", "vertex-ai", "AI / ML models and pipelines."],
+  ["marketplace", "🛒", "Marketplace", "marketplace", "Install Google Cloud apps and tools."],
+  ["audit", "🕵️", "Audit Logs", "logs/query", "Track every administrative action."],
+  ["settings", "⚙️", "Settings", "", "Configure the Project ID, Maps key and OAuth used by this app."]
+];
+function GoogleCloudTab() {
+  const [g, setG] = useState(null);
+  const [sel, setSel] = useState("dashboard");
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { api("/public/google").then(setG).catch(() => setG({})); }, []);
+  if (!g) return <div className="empty">Loading…</div>;
+  const proj = g.projectId || "";
+  const link = path => "https://console.cloud.google.com/" + path + (proj ? "?project=" + encodeURIComponent(proj) : "");
+  const open = path => window.open(link(path), "_blank", "noopener");
+  const save = async () => {
+    setErr("");
+    try { await api("/google", { method: "PUT", body: { clientId: g.clientId || "", projectId: g.projectId || "", projectNumber: g.projectNumber || "", mapsApiKey: g.mapsApiKey || "" } }); setSaved(true); setTimeout(() => setSaved(false), 2500); }
+    catch (e) { setErr(e.message); }
+  };
+  const cur = GCP_SECTIONS.find(s => s[0] === sel) || GCP_SECTIONS[0];
+  const configForm = (
+    <div>
+      <div className="row">
+        <div><label>Project ID</label><input value={g.projectId || ""} onChange={e => setG({ ...g, projectId: e.target.value })} placeholder="project-61b2ad00-343f-4a5e-b63" /></div>
+        <div><label>Project Number</label><input value={g.projectNumber || ""} onChange={e => setG({ ...g, projectNumber: e.target.value })} placeholder="467733758072" /></div>
+      </div>
+      <label>OAuth Client ID (Sign in with Google)</label>
+      <input value={g.clientId || ""} onChange={e => setG({ ...g, clientId: e.target.value })} placeholder="…apps.googleusercontent.com" />
+      <label>Google Maps API key (for guest directions & map)</label>
+      <input value={g.mapsApiKey || ""} onChange={e => setG({ ...g, mapsApiKey: e.target.value })} placeholder="AIza…" />
+      <p className="muted mt" style={{ fontSize: 12 }}>The Maps key is a browser key — restrict it by HTTP referrer (your domain) in the console. The OAuth secret is never stored here.</p>
+      {err && <p className="red mt">⚠ {err}</p>}
+      <button className="btn mt" onClick={save}>{saved ? "✓ Saved!" : "Save Google Cloud config"}</button>
+    </div>
+  );
+  return (
+    <div>
+      <PageHead t="Google Cloud Console" s="Launch every Google Cloud service for your project, and manage the keys this app uses — no fake data, real console links." />
+      <div className="grid" style={{ gridTemplateColumns: "230px 1fr", gap: 16, alignItems: "start" }}>
+        <div className="card" style={{ padding: 8, maxHeight: "70vh", overflowY: "auto" }}>
+          {GCP_SECTIONS.map(s => (
+            <button key={s[0]} className={"btn sm " + (sel === s[0] ? "" : "ghost")} style={{ width: "100%", justifyContent: "flex-start", marginBottom: 4, textAlign: "left" }} onClick={() => setSel(s[0])}>{s[1]} {s[2]}</button>
+          ))}
+        </div>
+        <div className="card">
+          <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+            <h3 className="gold" style={{ margin: 0 }}>{cur[1]} {cur[2]}</h3>
+            {cur[3] ? <button className="btn sm" onClick={() => open(cur[3])}>Open in Google Cloud Console ↗</button> : null}
+          </div>
+          <p className="muted">{cur[4]}</p>
+
+          {sel === "dashboard" && <div>
+            <div className="grid c4 mt">
+              <div className="card" style={{ padding: 14 }}><div className="muted" style={{ fontSize: 12 }}>Project ID</div><b>{g.projectId || "— not set —"}</b></div>
+              <div className="card" style={{ padding: 14 }}><div className="muted" style={{ fontSize: 12 }}>Project Number</div><b>{g.projectNumber || "—"}</b></div>
+              <div className="card" style={{ padding: 14 }}><div className="muted" style={{ fontSize: 12 }}>Google Sign-In</div><b className={g.clientId ? "green" : "red"}>{g.clientId ? "Configured ✓" : "Not set"}</b></div>
+              <div className="card" style={{ padding: 14 }}><div className="muted" style={{ fontSize: 12 }}>Maps API key</div><b className={g.mapsApiKey ? "green" : "red"}>{g.mapsApiKey ? "Configured ✓" : "Not set"}</b></div>
+            </div>
+            <h4 className="gold mb mt">Quick launch</h4>
+            <div className="grid c4">
+              {GCP_SECTIONS.filter(s => s[3]).map(s => (
+                <button key={s[0]} className="card" style={{ cursor: "pointer", textAlign: "center", padding: 14 }} onClick={() => open(s[3])}>
+                  <div style={{ fontSize: 26 }}>{s[1]}</div><div style={{ fontSize: 12.5 }}>{s[2]}</div>
+                </button>
+              ))}
+            </div>
+            <p className="muted mt" style={{ fontSize: 12 }}>Live infrastructure (VMs, billing amounts, logs) opens directly in your real Google Cloud Console — this panel never shows made-up numbers.</p>
+          </div>}
+
+          {sel === "settings" && <div className="mt">{configForm}</div>}
+
+          {sel !== "dashboard" && sel !== "settings" && <div className="mt">
+            <button className="btn" onClick={() => open(cur[3])}>Open {cur[2]} in Google Cloud Console ↗</button>
+            {(sel === "credentials" || sel === "apis" || sel === "oauth") ? <div className="mt">{configForm}</div> : null}
+          </div>}
+        </div>
       </div>
     </div>
   );
