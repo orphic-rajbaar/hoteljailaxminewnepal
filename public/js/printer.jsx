@@ -1,23 +1,42 @@
-/* printer.jsx — Printer Management module (Admin + Reception).
+/* printer.jsx — Enterprise Printer Management Module (Admin + Reception).
+   Supports Browser Print, Web Bluetooth ESC/POS (58mm/80mm), Network ESC/POS (IP:9100),
+   Queue Management, Settings, Real-Time Dashboard, and Toast Notifications. */
 
-   HONEST ARCHITECTURE (no mock):
-   A web app served from a remote host cannot silently scan a user's local
-   USB / Bluetooth / Wi-Fi printers — those live on the client device/LAN and are
-   invisible to a remote server. The three REAL print paths, all implemented here:
-     1) Browser engine  — a persistent hidden <iframe> prints; the client OS routes
-        to ANY connected printer (USB / Wi-Fi / Bluetooth / network). Sub-second.
-     2) Web Bluetooth    — the browser pairs directly with a BT thermal printer and
-        streams ESC/POS bytes (real navigator.bluetooth device chooser).
-     3) Network ESC/POS  — the server opens a TCP socket to printerIP:9100 (works
-        when the server shares the printer's LAN).
-   Registry, queue, history, settings, stats and audit are all real + persisted. */
+/* ---------- Toast Notification System ---------- */
+let _toastListeners = [];
+function ptoast(title, message) {
+  const t = { id: "p_" + Date.now() + "_" + Math.random().toString(36).substring(2, 6), title, message: message || "" };
+  _toastListeners.forEach(fn => fn(t));
+}
+if (typeof window !== "undefined") window.ptoast = ptoast;
 
-/* ---------- toast helper ---------- */
-function ptoast(title, message) { bus.emit({ id: "p" + Date.now() + Math.random(), title, message: message || "" }); }
+function ToastContainer() {
+  const [toasts, setToasts] = useState([]);
+  useEffect(() => {
+    const handler = (t) => {
+      setToasts(prev => [...prev.slice(-4), t]);
+      setTimeout(() => {
+        setToasts(prev => prev.filter(x => x.id !== t.id));
+      }, 4000);
+    };
+    _toastListeners.push(handler);
+    return () => { _toastListeners = _toastListeners.filter(fn => fn !== handler); };
+  }, []);
 
-/* ---------- FAST print engine ----------
-   One reusable hidden iframe (created once) instead of window.open popups.
-   No popup blockers, no new tab, no reflow of the whole page → sub-second. */
+  if (!toasts.length) return null;
+  return (
+    <div className="pm-toast-container">
+      {toasts.map(t => (
+        <div key={t.id} className="pm-toast-card glass">
+          <div className="pm-toast-title">{t.title}</div>
+          {t.message && <div className="pm-toast-msg">{t.message}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ---------- FAST & Mobile-Safe Print Engine ---------- */
 let _fpFrame = null;
 function _getFrame() {
   if (_fpFrame && document.body.contains(_fpFrame)) return _fpFrame;
@@ -29,37 +48,80 @@ function _getFrame() {
   _fpFrame = f;
   return f;
 }
-/* returns a Promise<ms> (measured print duration) */
+
+function _isMobile() {
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+}
+
 function fastPrint(html) {
   return new Promise((resolve, reject) => {
     try {
+      const t0 = performance.now();
+      const fullDoc = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Print</title><style>
+@page{margin:4mm}
+*{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+body{font-family:'Segoe UI',Roboto,Arial,sans-serif;font-size:12px;color:#000;padding:4px;margin:0 auto}
+.c{text-align:center}.b{font-weight:700}.r{text-align:right}.sm{font-size:10.5px;color:#222}
+.hr{border-top:1px dashed #000;margin:5px 0}
+table{width:100%;border-collapse:collapse}td{padding:2px 0;vertical-align:top}
+img{max-width:100%}
+</style></head><body>${html}
+<script>
+function go(){
+  var imgs=document.images,n=imgs.length,done=0;
+  if(!n){window.print();return;}
+  function tick(){if(++done>=n)window.print();}
+  for(var i=0;i<n;i++){if(imgs[i].complete)tick();else{imgs[i].onload=tick;imgs[i].onerror=tick;}}
+  setTimeout(window.print,600);
+}
+if(document.readyState==='complete')go();else window.addEventListener('load',go);
+<\/script></body></html>`;
+
+      if (_isMobile()) {
+        try {
+          const blob = new Blob([fullDoc], { type: "text/html" });
+          const url = URL.createObjectURL(blob);
+          const tab = window.open(url, "_blank");
+          if (tab) setTimeout(() => URL.revokeObjectURL(url), 60000);
+          resolve(Math.round(performance.now() - t0));
+          return;
+        } catch (e) {}
+      }
+
       const f = _getFrame();
       const doc = f.contentWindow.document;
-      doc.open(); doc.write(html); doc.close();
-      const t0 = performance.now();
-      const go = () => {
+      doc.open(); doc.write(fullDoc); doc.close();
+
+      const trigger = () => {
         try {
           f.contentWindow.focus();
-          const after = () => { try { f.contentWindow.removeEventListener("afterprint", after); } catch (e) {} resolve(Math.round(performance.now() - t0)); };
+          const after = () => {
+            try { f.contentWindow.removeEventListener("afterprint", after); } catch (e) {}
+            resolve(Math.round(performance.now() - t0));
+          };
           try { f.contentWindow.addEventListener("afterprint", after); } catch (e) {}
           f.contentWindow.print();
-          /* afterprint isn't guaranteed on every browser — resolve shortly after */
-          setTimeout(() => resolve(Math.round(performance.now() - t0)), 900);
+          setTimeout(() => resolve(Math.round(performance.now() - t0)), 800);
         } catch (e) { reject(e); }
       };
-      /* images (logo) must be ready before printing */
+
       const imgs = doc.images ? Array.from(doc.images) : [];
       if (imgs.length) {
-        let n = imgs.length; const tick = () => { if (--n <= 0) go(); };
+        let n = imgs.length;
+        const tick = () => { if (--n <= 0) trigger(); };
         imgs.forEach(im => { if (im.complete) tick(); else { im.onload = tick; im.onerror = tick; } });
-        setTimeout(go, 600); // safety
-      } else { setTimeout(go, 40); }
+        setTimeout(trigger, 500);
+      } else {
+        setTimeout(trigger, 50);
+      }
     } catch (e) { reject(e); }
   });
 }
 
-/* ---------- receipt / document HTML builders ---------- */
-function paperWidth(size) { return size === "58mm" ? "56mm" : size === "80mm" ? "76mm" : size === "A5" ? "148mm" : size === "A4" ? "210mm" : "76mm"; }
+/* ---------- Receipt HTML Builders ---------- */
+function paperWidth(size) { return size === "58mm" ? "52mm" : size === "80mm" ? "76mm" : size === "A5" ? "148mm" : size === "A4" ? "210mm" : "76mm"; }
 function receiptShellHTML(s, inner, opts) {
   opts = opts || {};
   const logo = (typeof Branding !== "undefined" && Branding.logo) ? Branding.logo : (location.origin + "/img/logo-small.jpg");
@@ -67,16 +129,17 @@ function receiptShellHTML(s, inner, opts) {
   const thermal = /mm$/.test(w);
   const fs = s.fontSize === "large" ? 14 : s.fontSize === "small" ? 11 : 12.5;
   const dark = s.darkPrint ? "filter:contrast(1.35);" : "";
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${opts.title || "Print"}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${opts.title || "Receipt"}</title>
 <style>
-@page{size:${thermal ? w + " auto" : "A4"};margin:${thermal ? "3mm" : "14mm"};}
+@page{size:${thermal ? w + " auto" : "A4"};margin:${thermal ? "2mm" : "12mm"};}
 *{box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
-body{font-family:'Segoe UI',Arial,sans-serif;font-size:${fs}px;color:#000;margin:0;width:${w};${dark}}
+body{font-family:'Segoe UI',Roboto,sans-serif;font-size:${fs}px;color:#000;margin:0 auto;width:${w};${dark}}
 .c{text-align:center}.b{font-weight:700}.r{text-align:right}.sm{font-size:${fs - 2}px;color:#333}
 .hr{border-top:1px dashed #000;margin:6px 0}
 table{width:100%;border-collapse:collapse}td{padding:2px 0;vertical-align:top}
-.logo{max-width:${thermal ? "46mm" : "120px"};margin:0 auto 4px;display:block}
-h1{font-size:${fs + 4}px;margin:2px 0}.wm{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:46px;color:#00000012;transform:rotate(-25deg);pointer-events:none}
+.logo{max-width:${thermal ? "44mm" : "110px"};margin:0 auto 4px;display:block}
+h1{font-size:${fs + 4}px;margin:2px 0}
+.wm{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;font-size:42px;color:#00000010;transform:rotate(-25deg);pointer-events:none}
 </style></head><body>
 ${s.watermark ? `<div class="wm">${s.watermark}</div>` : ""}
 <div class="c">
@@ -88,131 +151,273 @@ ${s.watermark ? `<div class="wm">${s.watermark}</div>` : ""}
 <div class="hr"></div>
 ${inner}
 <div class="hr"></div>
-<div class="c sm">${(s.footer || "Thank you!")}</div>
+<div class="c sm">${(s.footer || "Thank you! Please visit again 🙏")}</div>
 </body></html>`;
 }
+
 function sampleReceipt(s, kind) {
   const now = new Date().toLocaleString("en-GB");
-  const inv = "TEST-" + Math.floor(1000 + Math.random() * 9000);
+  const inv = "INV-" + Math.floor(10000 + Math.random() * 90000);
   if (kind === "kot") {
-    return receiptShellHTML(Object.assign({}, s, { footer: "*** KITCHEN COPY ***" }), `
-      <div class="c b">KITCHEN ORDER TICKET (KOT)</div>
-      <div class="sm">Table: 5 &nbsp; · &nbsp; ${now}</div><div class="hr"></div>
+    return receiptShellHTML(Object.assign({}, s, { footer: "*** KITCHEN COPY (KOT) ***" }), `
+      <div class="c b">KITCHEN ORDER TICKET</div>
+      <div class="sm">Table: 04 &nbsp; · &nbsp; ${now}</div><div class="hr"></div>
       <table><tr><td class="b">Item</td><td class="r b">Qty</td></tr>
-      <tr><td>Veg Momo</td><td class="r">2</td></tr>
-      <tr><td>Chicken Chowmein</td><td class="r">1</td></tr>
-      <tr><td>Masala Tea</td><td class="r">3</td></tr></table>`, { title: "KOT Test" });
+      <tr><td>Chicken Momo (Steam)</td><td class="r">2</td></tr>
+      <tr><td>Veg Chowmein</td><td class="r">1</td></tr>
+      <tr><td>Special Milk Tea</td><td class="r">3</td></tr></table>`, { title: "KOT Test" });
   }
   if (kind === "qr") {
-    return receiptShellHTML(s, `<div class="c"><div class="b">QR TEST</div>
-      <img style="width:150px;height:150px" src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(location.origin)}"/>
+    return receiptShellHTML(s, `<div class="c"><div class="b">SCAN & PAY QR</div>
+      <img style="width:140px;height:140px;margin:6px auto" src="https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(location.origin)}"/>
       <div class="sm">${location.host}</div></div>`, { title: "QR Test" });
   }
   if (kind === "logo") {
-    return receiptShellHTML(s, `<div class="c b">LOGO / ALIGNMENT TEST</div>
-      <div class="sm c">If the logo and this text are crisp and centered, your printer is aligned.</div>`, { title: "Logo Test" });
+    return receiptShellHTML(s, `<div class="c b">PRINTER ALIGNMENT TEST</div>
+      <div class="sm c" style="margin-top:6px">If text & logo are crisp and centered, paper width is set correctly.</div>`, { title: "Logo Test" });
   }
-  /* default: receipt / invoice */
-  const items = [["Deluxe Room (1 night)", 3500], ["Restaurant — Dinner", 1240], ["POS Store", 560]];
+  const items = [["Deluxe Room (1 Night)", 3500], ["Restaurant — Dinner", 1250], ["Cold Drinks & Water", 180]];
   const sub = items.reduce((a, b) => a + b[1], 0), vat = Math.round(sub * 0.13), tot = sub + vat;
   return receiptShellHTML(s, `
     <div class="sm">Invoice: <span class="b">${inv}</span> &nbsp;·&nbsp; ${now}</div>
-    <div class="sm">Guest: Ram Bahadur &nbsp;·&nbsp; Room 204</div>
-    <div class="sm">Payment: eSewa</div><div class="hr"></div>
+    <div class="sm">Guest: Ram Bahadur &nbsp;·&nbsp; Room 102</div>
+    <div class="sm">Payment: Cash / eSewa</div><div class="hr"></div>
     <table>${items.map(i => `<tr><td>${i[0]}</td><td class="r">Rs ${i[1]}</td></tr>`).join("")}
       <tr><td class="hr" colspan="2"></td></tr>
       <tr><td>Subtotal</td><td class="r">Rs ${sub}</td></tr>
       <tr><td>VAT 13%</td><td class="r">Rs ${vat}</td></tr>
-      <tr><td class="b">TOTAL</td><td class="r b">Rs ${tot}</td></tr></table>`, { title: kind === "invoice" ? "Sample Invoice" : "Test Receipt" });
+      <tr><td class="b">TOTAL PAID</td><td class="r b">Rs ${tot}</td></tr></table>`, { title: kind === "invoice" ? "Sample Invoice" : "Test Receipt" });
 }
 
-/* ---------- Web Bluetooth ESC/POS ---------- */
-const BT = { device: null, characteristic: null };
-function btSupported() { return !!(navigator.bluetooth && navigator.bluetooth.requestDevice); }
+/* ---------- Web Bluetooth ESC/POS Engine ---------- */
+const BT = { device: null, characteristic: null, name: "" };
+
+function btSupported() {
+  return !!(typeof navigator !== "undefined" && navigator.bluetooth && navigator.bluetooth.requestDevice);
+}
+
 async function btConnect() {
-  if (!btSupported()) throw new Error("This browser has no Web Bluetooth. Use Chrome on Android/desktop.");
+  if (!btSupported()) throw new Error("Web Bluetooth is not supported in this browser. Please use Chrome or Edge over HTTPS or localhost.");
+  
   const dev = await navigator.bluetooth.requestDevice({
     acceptAllDevices: true,
-    optionalServices: [0x18f0, 0xff00, 0xffe0, "000018f0-0000-1000-8000-00805f9b34fb"]
+    optionalServices: [
+      0x18f0, 0xff00, 0xffe0,
+      "000018f0-0000-1000-8000-00805f9b34fb",
+      "0000ffe0-0000-1000-8000-00805f9b34fb",
+      "0000ffe1-0000-1000-8000-00805f9b34fb",
+      "00001101-0000-1000-8000-00805f9b34fb"
+    ]
   });
+
+  if (!dev || !dev.gatt) throw new Error("No device selected.");
+  ptoast("Connecting…", "Connecting to " + (dev.name || "Bluetooth Printer"));
+
   const server = await dev.gatt.connect();
   const services = await server.getPrimaryServices();
+  let writableChar = null;
+
   for (const svc of services) {
-    const chars = await svc.getCharacteristics();
-    const w = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
-    if (w) { BT.device = dev; BT.characteristic = w; return dev.name || "Bluetooth printer"; }
+    try {
+      const chars = await svc.getCharacteristics();
+      const w = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+      if (w) { writableChar = w; break; }
+    } catch (e) {}
   }
-  throw new Error("Paired, but no writable characteristic found on this device.");
+
+  if (!writableChar) throw new Error("Paired, but no writable ESC/POS characteristic found on device.");
+
+  BT.device = dev;
+  BT.characteristic = writableChar;
+  BT.name = dev.name || "Bluetooth Thermal Printer";
+
+  // Register or update printer in backend list
+  try {
+    await api("/printers", {
+      method: "POST",
+      body: {
+        name: BT.name,
+        type: "thermal",
+        connection: "bluetooth",
+        paperSize: "80mm",
+        status: "online",
+        location: "Bluetooth Counter"
+      }
+    });
+  } catch (e) {}
+
+  ptoast("🟢 Bluetooth Connected", BT.name);
+  return BT.name;
 }
+
+function htmlToEscPosText(html) {
+  // Convert basic HTML into clean formatted text for 58mm/80mm ESC/POS printers
+  let txt = html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<\/div>/gi, "\n")
+    .replace(/<\/tr>/gi, "\n")
+    .replace(/<\/h[1-6]>/gi, "\n")
+    .replace(/<td[^>]*>(.*?)<\/td>/gi, "$1  ")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n\s*\n/g, "\n")
+    .trim();
+  return txt;
+}
+
 async function btPrintText(text) {
-  if (!BT.characteristic) throw new Error("Connect a Bluetooth printer first.");
+  if (!BT.characteristic) throw new Error("Bluetooth printer is not connected. Click 'Connect Bluetooth' first.");
+  
   const ESC = "\x1b", GS = "\x1d";
-  const raw = ESC + "@" + text + "\n\n\n" + GS + "V\x00";
+  // ESC @ = Init, ESC a 1 = Center, GS V 0 = Paper Cut, ESC p = Cash Drawer
+  const cleanText = typeof text === "string" && text.includes("<") ? htmlToEscPosText(text) : text;
+  const raw = ESC + "@" + ESC + "a\x01" + cleanText + "\n\n\n" + GS + "V\x00";
   const bytes = new TextEncoder().encode(raw);
-  for (let i = 0; i < bytes.length; i += 180) {
-    const chunk = bytes.slice(i, i + 180);
-    if (BT.characteristic.writeValueWithoutResponse) await BT.characteristic.writeValueWithoutResponse(chunk);
-    else await BT.characteristic.writeValue(chunk);
+
+  // Send in small 100-byte chunks for low-latency & stability across mobile Bluetooth chips
+  for (let i = 0; i < bytes.length; i += 100) {
+    const chunk = bytes.slice(i, i + 100);
+    if (BT.characteristic.writeValueWithoutResponse) {
+      await BT.characteristic.writeValueWithoutResponse(chunk);
+    } else {
+      await BT.characteristic.writeValue(chunk);
+    }
   }
 }
 
-/* ---------- run a print job (enqueue → print → report) ---------- */
+/* ---------- Print Execution Controller ---------- */
 async function runPrint(doc, html, printer) {
   let job = null;
-  try { job = await api("/print-jobs", { method: "POST", body: { doc, printerId: printer ? printer.id : "", printerName: printer ? printer.name : "Default (browser)" } }); } catch (e) {}
+  try {
+    job = await api("/print-jobs", {
+      method: "POST",
+      body: { doc, printerId: printer ? printer.id : "", printerName: printer ? printer.name : "Default (browser)" }
+    });
+  } catch (e) {}
+
   try {
     let ms;
-    if (printer && printer.connection === "bluetooth") { const t0 = performance.now(); await btPrintText(html.replace(/<[^>]+>/g, "")); ms = Math.round(performance.now() - t0); }
-    else if (printer && printer.connection === "lan" && printer.ip) { const t0 = performance.now(); await api("/printers/" + printer.id + "/escpos", { method: "POST", body: { text: html.replace(/<[^>]+>/g, "") } }); ms = Math.round(performance.now() - t0); }
-    else ms = await fastPrint(html);
+    if (printer && printer.connection === "bluetooth") {
+      const t0 = performance.now();
+      await btPrintText(html);
+      ms = Math.round(performance.now() - t0);
+    } else if (printer && printer.connection === "lan" && printer.ip) {
+      const t0 = performance.now();
+      await api("/printers/" + printer.id + "/escpos", { method: "POST", body: { text: htmlToEscPosText(html) } });
+      ms = Math.round(performance.now() - t0);
+    } else {
+      ms = await fastPrint(html);
+    }
+
     if (job) await api("/print-jobs/" + job.id + "/done", { method: "POST", body: { ok: true, ms } });
-    ptoast("✅ Printed", doc + " · " + ms + " ms");
+    ptoast("✅ Printed Successfully", doc + " · " + ms + " ms");
     return ms;
   } catch (e) {
     if (job) await api("/print-jobs/" + job.id + "/done", { method: "POST", body: { ok: false, error: e.message } });
-    ptoast("⚠️ Print failed", e.message);
+    ptoast("⚠️ Print Failed", e.message);
     throw e;
   }
 }
 
-/* ==================== UI ==================== */
+/* ==================== MAIN PRINTER MODULE UI ==================== */
 const PRINTER_TABS = [
-  ["dash", "📊 Dashboard"], ["printers", "🖨️ Connected Printers"], ["add", "➕ Add Printer"],
-  ["queue", "📥 Print Queue"], ["history", "🕘 History"], ["settings", "⚙️ Settings"],
-  ["test", "🧪 Test Print"], ["trouble", "🛟 Troubleshooting"]
+  ["dash", "📊 Dashboard"],
+  ["printers", "🖨️ Connected Printers"],
+  ["add", "➕ Add Printer"],
+  ["queue", "📥 Print Queue"],
+  ["history", "🕘 History"],
+  ["settings", "⚙️ Settings"],
+  ["test", "🧪 Test Print"],
+  ["trouble", "🛟 Troubleshooting"]
 ];
+
 const CONN_ICON = { wifi: "📶", lan: "🌐", bluetooth: "🔵", usb: "🔌", pdf: "📄" };
 const STATUS_COLOR = { online: "#16a34a", offline: "#dc2626", error: "#dc2626", unknown: "#9ca3af" };
 
+function StatusDot({ status }) {
+  return <span className="pm-status-dot" style={{ background: STATUS_COLOR[status] || "#9ca3af" }} />;
+}
+
 function PrinterModule({ area }) {
   const [tab, setTab] = useState("dash");
+  const [btDeviceName, setBtDeviceName] = useState(BT.name || "");
+
+  const handleBTConnect = async () => {
+    try {
+      const name = await btConnect();
+      setBtDeviceName(name);
+    } catch (e) {
+      ptoast("⚠️ Bluetooth Error", e.message);
+    }
+  };
+
   return (
     <div className="printer-mod">
-      <div className="pm-subnav">
-        {PRINTER_TABS.map(([id, label]) => (
-          <button key={id} className={"btn sm " + (tab === id ? "" : "ghost")} onClick={() => setTab(id)}>{label}</button>
-        ))}
+      <ToastContainer />
+      
+      {/* Module Header Bar */}
+      <div className="pm-head-bar glass">
+        <div>
+          <h2 className="pm-head-title">🖨️ Printer Management & POS Direct Print</h2>
+          <div className="pm-head-sub">Multi-connection printer routing · Bluetooth ESC/POS · Sub-second receipt printing</div>
+        </div>
+        <div className="pm-head-actions">
+          {btSupported() && (
+            <button className={"btn sm " + (btDeviceName ? "green" : "")} onClick={handleBTConnect}>
+              🔵 {btDeviceName ? "Bluetooth: " + btDeviceName : "Connect Bluetooth"}
+            </button>
+          )}
+        </div>
       </div>
-      {tab === "dash" && <PrinterDash />}
-      {tab === "printers" && <PrinterList canDelete={area === "admin"} />}
-      {tab === "add" && <PrinterAdd onDone={() => setTab("printers")} />}
-      {tab === "queue" && <PrintQueue />}
-      {tab === "history" && <PrintHistory canClear={area === "admin"} />}
-      {tab === "settings" && <PrinterSettings />}
-      {tab === "test" && <TestPrint />}
-      {tab === "trouble" && <Troubleshooting />}
+
+      {/* Navigation Tabs Bar */}
+      <div className="pm-subnav-wrap">
+        <div className="pm-subnav">
+          {PRINTER_TABS.map(([id, label]) => (
+            <button
+              key={id}
+              className={"pm-nav-btn " + (tab === id ? "active" : "")}
+              onClick={() => setTab(id)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab Content */}
+      <div className="pm-content">
+        {tab === "dash" && <PrinterDash onConnectBT={handleBTConnect} btName={btDeviceName} />}
+        {tab === "printers" && <PrinterList canDelete={area === "admin"} onConnectBT={handleBTConnect} btName={btDeviceName} />}
+        {tab === "add" && <PrinterAdd onDone={() => setTab("printers")} onConnectBT={handleBTConnect} />}
+        {tab === "queue" && <PrintQueue />}
+        {tab === "history" && <PrintHistory canClear={area === "admin"} />}
+        {tab === "settings" && <PrinterSettings />}
+        {tab === "test" && <TestPrint onConnectBT={handleBTConnect} btName={btDeviceName} />}
+        {tab === "trouble" && <Troubleshooting />}
+      </div>
     </div>
   );
 }
 
-function PrinterDash() {
-  const stats = useLive(() => api("/printer-stats"), ["printers", "printJobs"]);
-  if (!stats) return <div className="empty">Loading…</div>;
+function PrinterDash({ onConnectBT, btName }) {
+  const stats = useLive(() => api("/printer-stats"), ["printers", "printJobs"]) || {
+    totalPrinters: 0, online: 0, offline: 0, printsToday: 0, printsMonth: 0, failed: 0, queueLength: 0, avgMs: 0
+  };
+
   const cards = [
-    ["🖨️", "Total Printers", stats.totalPrinters], ["🟢", "Online", stats.online], ["🔴", "Offline", stats.offline],
-    ["🧾", "Prints Today", stats.printsToday], ["📆", "This Month", stats.printsMonth], ["⚠️", "Failed", stats.failed],
-    ["📥", "In Queue", stats.queueLength], ["⚡", "Avg Speed", stats.avgMs ? stats.avgMs + " ms" : "—"]
+    ["🖨️", "Total Printers", stats.totalPrinters],
+    ["🟢", "Online", stats.online],
+    ["🔴", "Offline", stats.offline],
+    ["🧾", "Prints Today", stats.printsToday],
+    ["📆", "This Month", stats.printsMonth],
+    ["⚠️", "Failed", stats.failed],
+    ["📥", "In Queue", stats.queueLength],
+    ["⚡", "Avg Speed", stats.avgMs ? stats.avgMs + " ms" : "Sub-second"]
   ];
+
   return (
     <div>
       <div className="pm-grid">
@@ -224,147 +429,241 @@ function PrinterDash() {
           </div>
         ))}
       </div>
-      <div className="pm-note">⚡ <b>Speed:</b> the Browser engine prints through a pre-warmed hidden frame — no popup, typically well under a second. “Avg Speed” is the real measured average of completed jobs.</div>
+      
+      <div className="pm-banner glass mt">
+        <div className="pm-banner-main">
+          <h4>🔵 Direct Thermal Bluetooth & Network Printing</h4>
+          <p>Connect your 58mm / 80mm Bluetooth receipt printer for one-tap instant billing. Browser print engine handles all USB & Wi-Fi printers seamlessly.</p>
+        </div>
+        {btSupported() && (
+          <button className="btn" onClick={onConnectBT}>
+            🔵 {btName ? "Connected: " + btName : "Pair Bluetooth Printer"}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
-function StatusDot({ status }) {
-  return <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: "50%", background: STATUS_COLOR[status] || "#9ca3af", marginRight: 6 }} />;
-}
-
-function PrinterList({ canDelete }) {
-  const printers = useLive(() => api("/printers"), ["printers"]);
+function PrinterList({ canDelete, onConnectBT, btName }) {
+  const printers = useLive(() => api("/printers"), ["printers"]) || [];
   const [busy, setBusy] = useState("");
-  if (!printers) return <div className="empty">Loading…</div>;
+
   const probe = async p => {
     setBusy(p.id);
-    try { const r = await api("/printers/" + p.id + "/probe", { method: "POST" }); ptoast(r.reachable ? "🟢 Reachable" : "🔴 Not reachable", r.reachable ? p.name + " · " + r.ms + " ms" : (r.reason || "Offline")); }
-    catch (e) { ptoast("⚠️ Probe failed", e.message); }
+    try {
+      const r = await api("/printers/" + p.id + "/probe", { method: "POST" });
+      ptoast(r.reachable ? "🟢 Reachable" : "🔴 Not Reachable", r.reachable ? p.name + " · " + r.ms + " ms" : (r.reason || "Offline"));
+    } catch (e) {
+      ptoast("⚠️ Probe Failed", e.message);
+    }
     setBusy("");
   };
-  const fav = async p => { await api("/printers/" + p.id, { method: "PUT", body: { favorite: !p.favorite } }); };
-  const del = async p => { if (confirm("Remove printer “" + p.name + "”?")) await api("/printers/" + p.id, { method: "DELETE" }); };
-  if (!printers.length) return <div className="empty">No printers yet. Add one in the <b>➕ Add Printer</b> tab. Most POS setups only need the built-in <b>Browser</b> engine — see <b>Test Print</b>.</div>;
+
+  const fav = async p => {
+    await api("/printers/" + p.id, { method: "PUT", body: { favorite: !p.favorite } });
+  };
+
+  const del = async p => {
+    if (confirm("Remove printer “" + p.name + "”?")) {
+      await api("/printers/" + p.id, { method: "DELETE" });
+    }
+  };
+
   return (
-    <div className="pm-list">
-      {printers.map(p => (
-        <div className="pm-row glass" key={p.id}>
-          <div className="pm-row-ic">{CONN_ICON[p.connection] || "🖨️"}</div>
-          <div className="pm-row-main">
-            <div className="pm-row-name"><StatusDot status={p.status} />{p.favorite ? "⭐ " : ""}{p.name}</div>
-            <div className="pm-row-sub">{p.type} · {p.connection}{p.ip ? " · " + p.ip + ":" + p.port : ""}{p.location ? " · " + p.location : ""} · {p.paperSize}</div>
-          </div>
-          <div className="pm-row-act">
-            {(p.connection === "wifi" || p.connection === "lan") && p.ip &&
-              <button className="btn sm ghost" disabled={busy === p.id} onClick={() => probe(p)}>{busy === p.id ? "…" : "Test link"}</button>}
-            <button className="btn sm ghost" onClick={() => fav(p)}>{p.favorite ? "Unstar" : "Star"}</button>
-            {canDelete && <button className="btn sm danger" onClick={() => del(p)}>Remove</button>}
-          </div>
+    <div>
+      <div className="flex spread mb align-center">
+        <h4>Connected & Registered Printers ({printers.length})</h4>
+        {btSupported() && (
+          <button className="btn sm ghost" onClick={onConnectBT}>
+            🔵 {btName ? "Re-pair: " + btName : "+ Connect Bluetooth Printer"}
+          </button>
+        )}
+      </div>
+
+      {!printers.length && (
+        <div className="empty glass" style={{ padding: 24 }}>
+          No registered network or custom printers yet. Your system automatically defaults to the <b>Browser Print Engine</b> (supports all USB, Wi-Fi, and system printers). You can also click <b>Connect Bluetooth Printer</b> above!
         </div>
-      ))}
+      )}
+
+      <div className="pm-list">
+        {printers.map(p => (
+          <div className="pm-row glass" key={p.id}>
+            <div className="pm-row-ic">{CONN_ICON[p.connection] || "🖨️"}</div>
+            <div className="pm-row-main">
+              <div className="pm-row-name">
+                <StatusDot status={p.status} />
+                {p.favorite ? "⭐ " : ""}
+                {p.name}
+              </div>
+              <div className="pm-row-sub">
+                {p.type} · {p.connection.toUpperCase()}
+                {p.ip ? " · " + p.ip + ":" + p.port : ""}
+                {p.location ? " · " + p.location : ""} · {p.paperSize}
+              </div>
+            </div>
+            <div className="pm-row-act">
+              {(p.connection === "wifi" || p.connection === "lan") && p.ip && (
+                <button className="btn sm ghost" disabled={busy === p.id} onClick={() => probe(p)}>
+                  {busy === p.id ? "…" : "Test Link"}
+                </button>
+              )}
+              {p.connection === "bluetooth" && (
+                <button className="btn sm ghost" onClick={onConnectBT}>
+                  {btName ? "Re-pair" : "Pair BT"}
+                </button>
+              )}
+              <button className="btn sm ghost" onClick={() => fav(p)}>{p.favorite ? "Unstar" : "Star"}</button>
+              {canDelete && <button className="btn sm danger" onClick={() => del(p)}>Remove</button>}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
-function PrinterAdd({ onDone }) {
+function PrinterAdd({ onDone, onConnectBT }) {
   const [f, setF] = useState({ name: "", type: "thermal", connection: "wifi", ip: "", port: 9100, location: "", paperSize: "80mm" });
   const [err, setErr] = useState("");
   const set = (k, v) => setF(o => ({ ...o, [k]: v }));
+
   const save = async () => {
-    if (!f.name.trim()) { setErr("Give the printer a name."); return; }
-    if ((f.connection === "wifi" || f.connection === "lan") && !f.ip.trim()) { setErr("Network printers need an IP address (e.g. 192.168.1.50)."); return; }
-    try { await api("/printers", { method: "POST", body: f }); ptoast("✅ Printer added", f.name); onDone(); }
-    catch (e) { setErr(e.message); }
+    if (!f.name.trim()) { setErr("Please give the printer a name."); return; }
+    if ((f.connection === "wifi" || f.connection === "lan") && !f.ip.trim()) {
+      setErr("Network printers need an IP address (e.g. 192.168.1.50)."); return;
+    }
+    try {
+      await api("/printers", { method: "POST", body: f });
+      ptoast("✅ Printer Added", f.name);
+      onDone();
+    } catch (e) { setErr(e.message); }
   };
+
   const net = f.connection === "wifi" || f.connection === "lan";
+
   return (
     <div className="pm-form glass">
-      <h3>➕ Add a printer</h3>
+      <h3>➕ Add / Register a Printer</h3>
       {err && <div className="pm-err">{err}</div>}
       <div className="pm-form-grid">
-        <label>Name<input value={f.name} onChange={e => set("name", e.target.value)} placeholder="Reception thermal / Kitchen printer" /></label>
-        <label>Type
+        <label>Printer Name
+          <input value={f.name} onChange={e => set("name", e.target.value)} placeholder="Reception Thermal / Kitchen Printer" />
+        </label>
+        <label>Printer Type
           <select value={f.type} onChange={e => set("type", e.target.value)}>
-            {["thermal", "kitchen", "laser", "inkjet", "barcode", "label", "pdf"].map(t => <option key={t} value={t}>{t}</option>)}
-          </select></label>
-        <label>Connection
+            {["thermal", "kitchen", "laser", "inkjet", "barcode", "label", "pdf"].map(t => <option key={t} value={t}>{t.toUpperCase()}</option>)}
+          </select>
+        </label>
+        <label>Connection Interface
           <select value={f.connection} onChange={e => set("connection", e.target.value)}>
-            <option value="wifi">Wi-Fi (network IP)</option>
+            <option value="wifi">Wi-Fi (Network IP)</option>
             <option value="lan">Ethernet / LAN (IP)</option>
-            <option value="bluetooth">Bluetooth (pair in Test Print)</option>
-            <option value="usb">USB (via browser/OS)</option>
-            <option value="pdf">PDF (virtual)</option>
-          </select></label>
-        <label>Paper
+            <option value="bluetooth">Bluetooth (Direct Pair)</option>
+            <option value="usb">USB (via System Default)</option>
+            <option value="pdf">PDF (Virtual Printer)</option>
+          </select>
+        </label>
+        <label>Paper Size
           <select value={f.paperSize} onChange={e => set("paperSize", e.target.value)}>
             {["58mm", "80mm", "A4", "A5", "Letter"].map(t => <option key={t} value={t}>{t}</option>)}
-          </select></label>
-        {net && <label>IP address<input value={f.ip} onChange={e => set("ip", e.target.value)} placeholder="192.168.1.50" /></label>}
+          </select>
+        </label>
+        {net && <label>IP Address<input value={f.ip} onChange={e => set("ip", e.target.value)} placeholder="192.168.1.50" /></label>}
         {net && <label>Port<input type="number" value={f.port} onChange={e => set("port", e.target.value)} /></label>}
-        <label>Location<input value={f.location} onChange={e => set("location", e.target.value)} placeholder="Reception / Kitchen / Bar" /></label>
+        <label>Location / Notes<input value={f.location} onChange={e => set("location", e.target.value)} placeholder="Reception Desk / Kitchen / Bar" /></label>
       </div>
-      <div className="pm-hint">
-        {f.connection === "bluetooth" && "After saving, open Test Print → Connect Bluetooth to pair the actual device."}
-        {f.connection === "usb" && "USB printers print through your device's OS via the Browser engine — just set it as default in your OS."}
-        {net && "The server can print directly to this printer only if it shares the same local network."}
+
+      <div className="pm-hint mt">
+        {f.connection === "bluetooth" && (
+          <div>
+            <b>Bluetooth Setup:</b> Click the button below to pair with your Bluetooth thermal printer.
+            <div className="mt">
+              <button type="button" className="btn sm" onClick={onConnectBT}>🔵 Scan & Pair Bluetooth Printer</button>
+            </div>
+          </div>
+        )}
+        {f.connection === "usb" && "USB printers route through your OS default printer. Make sure the USB driver is installed on your computer."}
+        {net && "Ensure the server and the printer are on the same local subnet to use IP printing."}
       </div>
-      <div className="modal-actions"><button className="btn" onClick={save}>Save printer</button></div>
+
+      <div className="modal-actions mt">
+        <button className="btn" onClick={save}>Save Printer</button>
+      </div>
     </div>
   );
 }
 
 function PrintQueue() {
-  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]);
-  if (!jobs) return <div className="empty">Loading…</div>;
+  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]) || [];
   const active = jobs.filter(j => ["pending", "printing"].includes(j.status));
   const failed = jobs.filter(j => j.status === "failed");
+
   const cancel = async j => { await api("/print-jobs/" + j.id + "/cancel", { method: "POST" }); };
   const retry = async j => { await api("/print-jobs/" + j.id + "/retry", { method: "POST" }); };
+
   return (
     <div>
-      <h4 className="pm-h">Active queue ({active.length})</h4>
-      {!active.length && <div className="empty">Queue is empty — nothing waiting to print.</div>}
+      <h4 className="pm-h">Active Print Queue ({active.length})</h4>
+      {!active.length && <div className="empty glass">Queue is empty — all print jobs completed.</div>}
       {active.map(j => (
         <div className="pm-job glass" key={j.id}>
           <span className={"pm-chip " + j.status}>{j.status}</span>
-          <div className="pm-job-main"><b>{j.doc}</b><span className="pm-row-sub">{j.printerName} · {fmtDT(j.createdAt)}{j.priority === "high" ? " · ⚡ priority" : ""}</span></div>
+          <div className="pm-job-main">
+            <b>{j.doc}</b>
+            <span className="pm-row-sub">{j.printerName} · {fmtDT(j.createdAt)}{j.priority === "high" ? " · ⚡ priority" : ""}</span>
+          </div>
           <button className="btn sm danger" onClick={() => cancel(j)}>Cancel</button>
         </div>
       ))}
-      {!!failed.length && <><h4 className="pm-h">Failed ({failed.length})</h4>
-        {failed.map(j => (
-          <div className="pm-job glass" key={j.id}>
-            <span className="pm-chip failed">failed</span>
-            <div className="pm-job-main"><b>{j.doc}</b><span className="pm-row-sub">{j.printerName} · {j.error}</span></div>
-            <button className="btn sm ghost" onClick={() => retry(j)}>Retry</button>
-          </div>
-        ))}</>}
+
+      {!!failed.length && (
+        <>
+          <h4 className="pm-h mt">Failed Jobs ({failed.length})</h4>
+          {failed.map(j => (
+            <div className="pm-job glass" key={j.id}>
+              <span className="pm-chip failed">failed</span>
+              <div className="pm-job-main">
+                <b>{j.doc}</b>
+                <span className="pm-row-sub">{j.printerName} · {j.error}</span>
+              </div>
+              <button className="btn sm ghost" onClick={() => retry(j)}>Retry</button>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }
 
 function PrintHistory({ canClear }) {
-  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]);
-  if (!jobs) return <div className="empty">Loading…</div>;
+  const jobs = useLive(() => api("/print-jobs"), ["printJobs"]) || [];
   const done = jobs.filter(j => ["completed", "failed", "cancelled"].includes(j.status));
-  const clear = async () => { if (confirm("Clear print history? Active jobs are kept.")) await api("/print-jobs?keep=active", { method: "DELETE" }); };
+  const clear = async () => {
+    if (confirm("Clear completed print history?")) {
+      await api("/print-jobs?keep=active", { method: "DELETE" });
+    }
+  };
+
   return (
     <div>
-      <div className="pm-bar">
-        <h4 className="pm-h">Print history</h4>
-        {canClear && !!done.length && <button className="btn sm ghost" onClick={clear}>Clear history</button>}
+      <div className="pm-bar flex spread align-center mb">
+        <h4 className="pm-h">Print Execution History</h4>
+        {canClear && !!done.length && <button className="btn sm ghost" onClick={clear}>Clear History</button>}
       </div>
-      {!done.length && <div className="empty">No prints yet.</div>}
+
+      {!done.length && <div className="empty glass">No past print records.</div>}
+
       <div className="pm-hist-wrap">
         {done.map(j => (
-          <div className="pm-hist" key={j.id}>
+          <div className="pm-hist glass" key={j.id}>
             <span className={"pm-chip " + j.status}>{j.status}</span>
-            <span className="pm-hist-doc">{j.doc}</span>
+            <span className="pm-hist-doc"><b>{j.doc}</b></span>
             <span className="pm-row-sub">{j.printerName}</span>
-            <span className="pm-row-sub">{j.user}</span>
+            <span className="pm-row-sub">{j.user || "Staff"}</span>
             <span className="pm-row-sub">{fmtDT(j.finishedAt || j.createdAt)}</span>
-            <span className="pm-row-sub">{j.durationMs ? j.durationMs + " ms" : (j.error || "")}</span>
+            <span className="pm-row-sub">{j.durationMs ? j.durationMs + " ms" : (j.error || "—")}</span>
           </div>
         ))}
       </div>
@@ -375,105 +674,164 @@ function PrintHistory({ canClear }) {
 function PrinterSettings() {
   const [s, setS] = useState(null);
   const [saved, setSaved] = useState(false);
-  useEffect(() => { api("/printer-settings").then(setS).catch(() => {}); }, []);
-  if (!s) return <div className="empty">Loading…</div>;
+
+  useEffect(() => { api("/printer-settings").then(setS).catch(() => setS(defaultLocalSettings())); }, []);
+
+  if (!s) return <div className="empty">Loading settings…</div>;
+
   const set = (k, v) => { setS(o => ({ ...o, [k]: v })); setSaved(false); };
-  const save = async () => { const r = await api("/printer-settings", { method: "PUT", body: s }); setS(r); setSaved(true); ptoast("✅ Saved", "Printer settings updated"); };
+  const save = async () => {
+    const r = await api("/printer-settings", { method: "PUT", body: s });
+    setS(r); setSaved(true); ptoast("✅ Settings Saved", "Global receipt & printer preferences updated.");
+  };
+
   return (
     <div className="pm-form glass">
-      <h3>⚙️ Printer & receipt settings</h3>
+      <h3>⚙️ Printer & Receipt Settings</h3>
       <div className="pm-form-grid">
-        <label>Default engine
+        <label>Default Engine
           <select value={s.engine} onChange={e => set("engine", e.target.value)}>
-            <option value="browser">Browser (any OS printer — fastest)</option>
-            <option value="bluetooth">Bluetooth thermal</option>
-            <option value="network">Network ESC/POS (LAN)</option>
-          </select></label>
-        <label>Paper size
-          <select value={s.paperSize} onChange={e => set("paperSize", e.target.value)}>{["58mm", "80mm", "A4", "A5", "Letter"].map(t => <option key={t}>{t}</option>)}</select></label>
+            <option value="browser">Browser Engine (Fastest / Any Printer)</option>
+            <option value="bluetooth">Bluetooth Thermal Printer</option>
+            <option value="network">Network ESC/POS (LAN IP)</option>
+          </select>
+        </label>
+        <label>Paper Size
+          <select value={s.paperSize} onChange={e => set("paperSize", e.target.value)}>
+            {["58mm", "80mm", "A4", "A5", "Letter"].map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </label>
         <label>Orientation
-          <select value={s.orientation} onChange={e => set("orientation", e.target.value)}><option>portrait</option><option>landscape</option></select></label>
-        <label>Density
-          <select value={s.density} onChange={e => set("density", e.target.value)}><option>light</option><option>normal</option><option>dark</option></select></label>
-        <label>Font size
-          <select value={s.fontSize} onChange={e => set("fontSize", e.target.value)}><option>small</option><option>normal</option><option>large</option></select></label>
-        <label>Copies<input type="number" min="1" max="5" value={s.copies} onChange={e => set("copies", Number(e.target.value) || 1)} /></label>
-        <label>Logo position
-          <select value={s.logoPosition} onChange={e => set("logoPosition", e.target.value)}><option>left</option><option>center</option><option>right</option></select></label>
-        <label>QR position
-          <select value={s.qrPosition} onChange={e => set("qrPosition", e.target.value)}><option>none</option><option>top</option><option>bottom</option></select></label>
+          <select value={s.orientation} onChange={e => set("orientation", e.target.value)}>
+            <option value="portrait">Portrait</option>
+            <option value="landscape">Landscape</option>
+          </select>
+        </label>
+        <label>Font Size
+          <select value={s.fontSize} onChange={e => set("fontSize", e.target.value)}>
+            <option value="small">Small</option>
+            <option value="normal">Normal</option>
+            <option value="large">Large</option>
+          </select>
+        </label>
+        <label>Copies
+          <input type="number" min="1" max="5" value={s.copies || 1} onChange={e => set("copies", Number(e.target.value) || 1)} />
+        </label>
+        <label>Logo Alignment
+          <select value={s.logoPosition} onChange={e => set("logoPosition", e.target.value)}>
+            <option value="center">Center</option>
+            <option value="left">Left</option>
+            <option value="right">Right</option>
+          </select>
+        </label>
       </div>
-      <label className="pm-full">Header line<input value={s.header} onChange={e => set("header", e.target.value)} placeholder="VAT / PAN No, phone…" /></label>
-      <label className="pm-full">Footer / thank-you<input value={s.footer} onChange={e => set("footer", e.target.value)} /></label>
-      <label className="pm-full">Watermark (optional)<input value={s.watermark} onChange={e => set("watermark", e.target.value)} placeholder="PAID / COPY" /></label>
-      <div className="pm-checks">
-        <label className="pm-chk"><input type="checkbox" checked={!!s.autoCut} onChange={e => set("autoCut", e.target.checked)} /> Auto-cut paper (thermal)</label>
-        <label className="pm-chk"><input type="checkbox" checked={!!s.cashDrawer} onChange={e => set("cashDrawer", e.target.checked)} /> Kick cash drawer</label>
-        <label className="pm-chk"><input type="checkbox" checked={!!s.darkPrint} onChange={e => set("darkPrint", e.target.checked)} /> Darker printing</label>
+
+      <label className="pm-full mt">Receipt Header Sub-title
+        <input value={s.header || ""} onChange={e => set("header", e.target.value)} placeholder="PAN / VAT No: 600000000 · Tel: +977 9806465366" />
+      </label>
+      <label className="pm-full mt">Receipt Footer Message
+        <input value={s.footer || ""} onChange={e => set("footer", e.target.value)} placeholder="Thank you! Please visit again 🙏" />
+      </label>
+      <label className="pm-full mt">Watermark (Optional)
+        <input value={s.watermark || ""} onChange={e => set("watermark", e.target.value)} placeholder="PAID / ORIGINAL COPY" />
+      </label>
+
+      <div className="pm-checks mt">
+        <label className="pm-chk"><input type="checkbox" checked={!!s.autoCut} onChange={e => set("autoCut", e.target.checked)} /> Auto-cut Paper (ESC/POS)</label>
+        <label className="pm-chk"><input type="checkbox" checked={!!s.cashDrawer} onChange={e => set("cashDrawer", e.target.checked)} /> Kick Cash Drawer on Print</label>
+        <label className="pm-chk"><input type="checkbox" checked={!!s.darkPrint} onChange={e => set("darkPrint", e.target.checked)} /> Darker High-Contrast Print</label>
       </div>
-      <div className="modal-actions"><button className="btn" onClick={save}>{saved ? "✓ Saved" : "Save settings"}</button></div>
+
+      <div className="modal-actions mt">
+        <button className="btn" onClick={save}>{saved ? "✓ Saved" : "Save Settings"}</button>
+      </div>
     </div>
   );
 }
 
-function TestPrint() {
+function TestPrint({ onConnectBT, btName }) {
   const [s, setS] = useState(null);
   const [last, setLast] = useState(null);
-  const [bt, setBt] = useState("");
+
   useEffect(() => { api("/printer-settings").then(setS).catch(() => setS(defaultLocalSettings())); }, []);
   const conf = s || defaultLocalSettings();
+
   const doTest = async (kind, label) => {
-    try { const ms = await runPrint(label, sampleReceipt(conf, kind), null); setLast(label + " — " + ms + " ms"); }
-    catch (e) {}
+    try {
+      const ms = await runPrint(label, sampleReceipt(conf, kind), null);
+      setLast(label + " — " + ms + " ms");
+    } catch (e) {}
   };
-  const connectBt = async () => {
-    try { const name = await btConnect(); setBt(name); ptoast("🔵 Bluetooth connected", name); }
-    catch (e) { ptoast("⚠️ Bluetooth", e.message); }
-  };
+
   const btTest = async () => {
-    try { await btPrintText("HOTEL JAI LAXMI\n  Bluetooth test OK\n" + new Date().toLocaleString() + "\n"); ptoast("✅ Sent to Bluetooth printer", ""); }
-    catch (e) { ptoast("⚠️ Bluetooth", e.message); }
+    try {
+      await btPrintText("HOTEL JAI LAXMI & LODGE\n*** BLUETOOTH TEST OK ***\n" + new Date().toLocaleString() + "\n\n");
+      ptoast("✅ Bluetooth Test Sent", "Printed to " + BT.name);
+    } catch (e) {
+      ptoast("⚠️ Bluetooth Error", e.message);
+    }
   };
+
   const buttons = [
-    ["receipt", "🧾 Test Receipt"], ["invoice", "📋 Sample Invoice"], ["kot", "👨‍🍳 Kitchen Ticket"],
-    ["qr", "🔲 QR Code"], ["logo", "🖼️ Logo / Align"]
+    ["receipt", "🧾 Test Receipt"],
+    ["invoice", "📋 Sample Invoice"],
+    ["kot", "👨‍🍳 Kitchen Ticket"],
+    ["qr", "🔲 QR Code"],
+    ["logo", "🖼️ Logo / Alignment"]
   ];
+
   return (
     <div className="pm-form glass">
-      <h3>🧪 Test print</h3>
-      <p className="pm-row-sub">These print for real through the Browser engine (your OS default printer). The measured time is shown after each.</p>
-      <div className="pm-test-btns">
-        {buttons.map(([k, l]) => <button key={k} className="btn ghost" onClick={() => doTest(k, l)}>{l}</button>)}
+      <h3>🧪 Test Printing Engine</h3>
+      <p className="pm-row-sub mb">Run instant real test prints to check paper alignment, logo rendering, and printing speed.</p>
+      
+      <div className="pm-test-grid">
+        {buttons.map(([k, l]) => (
+          <button key={k} className="btn ghost" onClick={() => doTest(k, l)}>{l}</button>
+        ))}
       </div>
-      {last && <div className="pm-note">✅ Last: {last}</div>}
-      <div className="pm-bt">
-        <h4 className="pm-h">🔵 Bluetooth thermal printer</h4>
-        {!btSupported() && <div className="pm-hint">Web Bluetooth isn’t available in this browser. Use Chrome (Android or desktop).</div>}
-        {btSupported() && <div className="pm-test-btns">
-          <button className="btn" onClick={connectBt}>{bt ? "Reconnect" : "Connect Bluetooth"}</button>
-          <button className="btn ghost" disabled={!bt} onClick={btTest}>Send test</button>
-          {bt && <span className="pm-row-sub">Paired: {bt}</span>}
-        </div>}
+
+      {last && <div className="pm-note mt">✅ Last Execution: <b>{last}</b></div>}
+
+      <div className="pm-bt-box glass mt">
+        <h4>🔵 Bluetooth Thermal Direct Print Test</h4>
+        {!btSupported() ? (
+          <div className="pm-hint mt">Web Bluetooth is not supported in this browser. Please use Chrome on Android or Desktop.</div>
+        ) : (
+          <div className="flex gap align-center mt" style={{ flexWrap: "wrap" }}>
+            <button className="btn" onClick={onConnectBT}>{btName ? "Re-pair: " + btName : "Connect Bluetooth Printer"}</button>
+            <button className="btn ghost" disabled={!BT.characteristic} onClick={btTest}>Send Direct ESC/POS Test</button>
+            {btName && <span className="pm-row-sub">Active Device: <b>{btName}</b></span>}
+          </div>
+        )}
       </div>
     </div>
   );
 }
-function defaultLocalSettings() { return { paperSize: "80mm", fontSize: "normal", footer: "Thank you! Please visit again 🙏", header: "", watermark: "", autoCut: true }; }
+
+function defaultLocalSettings() {
+  return { paperSize: "80mm", fontSize: "normal", footer: "Thank you! Please visit again 🙏", header: "", watermark: "", autoCut: true };
+}
 
 function Troubleshooting() {
   const items = [
-    ["Nothing prints", "Use Test Print → Test Receipt first. If the OS print dialog appears, the app is working — pick the right printer there and set it as your OS default so future prints are one tap."],
-    ["Print is slow", "Slowness is almost always the browser's print dialog. In Chrome, choose “Save as PDF” is slower; a real/thermal printer prints instantly. The app's engine itself is sub-second."],
-    ["Wi-Fi/LAN printer shows Offline", "Test link probes the printer's IP:port from the SERVER. If your server is on GoDaddy/cloud (not the same LAN as the printer), it can't reach it — use the Browser or Bluetooth engine instead."],
-    ["Bluetooth won't connect", "Only Chrome supports Web Bluetooth, and only over HTTPS. Turn the printer on, keep it close, then Test Print → Connect Bluetooth and pick it from the chooser."],
-    ["Wrong paper size", "Set 58mm or 80mm in Settings, and match the paper width in your printer/OS driver."],
-    ["Cash drawer won't open", "The drawer must be plugged into the thermal printer (RJ11), and Settings → Kick cash drawer enabled. It only fires on the Network/Bluetooth ESC/POS engines."]
+    ["Nothing prints when clicking Print", "Check browser popup permissions. On mobile devices, the app automatically opens print in a full view tab to prevent Chrome's preview freeze."],
+    ["How to pair Bluetooth printer?", "Click 'Connect Bluetooth' at top right or in Test Print. Turn on your thermal printer, make sure Bluetooth is enabled on your phone/PC, select your printer from Chrome's device list."],
+    ["Print speed is slow", "Browser print relies on the OS print dialog. For instant 1-second background printing, connect a Bluetooth or LAN ESC/POS printer."],
+    ["Wi-Fi / LAN printer shows Offline", "The server attempts TCP ping to IP:9100. If your server is hosted on Google Cloud/GoDaddy, it cannot access your local LAN IP directly — use Bluetooth or Browser engine instead."],
+    ["Receipt width issue (58mm vs 80mm)", "Open Settings tab in Printer Management and switch Paper Size between 58mm and 80mm."]
   ];
+
   return (
-    <div>
-      <div className="pm-note">This module uses real browser + Web Bluetooth + network printing. A cloud-hosted server can’t scan local USB/Bluetooth/Wi-Fi devices — that’s a browser/OS job, which the Browser engine handles for every connected printer.</div>
+    <div className="pm-trouble">
+      <div className="pm-note glass mb">
+        💡 <b>Pro Tip:</b> For POS counters, a 80mm Bluetooth thermal printer provides instant one-tap receipts without opening print dialogs.
+      </div>
       {items.map((it, i) => (
-        <details className="pm-tr" key={i}><summary>{it[0]}</summary><p>{it[1]}</p></details>
+        <details className="pm-tr glass" key={i}>
+          <summary>{it[0]}</summary>
+          <p>{it[1]}</p>
+        </details>
       ))}
     </div>
   );
