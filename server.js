@@ -24,6 +24,10 @@ const { Server } = require("socket.io");
   } catch (e) { /* ignore */ }
 })();
 
+/* optional email support — only active if 'nodemailer' is installed */
+let nodemailer = null;
+try { nodemailer = require("nodemailer"); } catch (e) { /* run `npm install nodemailer` to enable email login codes */ }
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
@@ -60,6 +64,7 @@ function freshDB() {
       esewaMode: "test", esewaProductCode: "EPAYTEST", esewaSecret: "8gBm/:&EnhH.1/q(", esewaEnabled: true,
       razorpayKeyId: "", razorpayKeySecret: "", razorpayEnabled: false, razorpayCurrency: "INR" },
     google: { clientId: "", projectId: "", projectNumber: "", mapsApiKey: "" }, // Google Cloud config
+    smtp: { host: "", port: 587, user: "", pass: "", from: "" }, // email (login codes / notifications)
     branding: { logo: "", favicon: "" },
     content: defaultContent(),
     payments: [],   // eSewa & other payment transactions
@@ -139,6 +144,7 @@ if (fs.existsSync(DB_FILE)) {
   if (db.google.projectId === undefined) db.google.projectId = "";
   if (db.google.projectNumber === undefined) db.google.projectNumber = "";
   if (db.google.mapsApiKey === undefined) db.google.mapsApiKey = "";
+  db.smtp = db.smtp || { host: "", port: 587, user: "", pass: "", from: "" };
   ensureContentShape();
 } else {
   db = freshDB();
@@ -250,6 +256,68 @@ app.post("/api/public/signin", (req, res) => {
     return res.status(401).json({ error: "Invalid email or password" });
   res.json({ token: sign(user), user: publicUser(user) });
 });
+/* ---------------- Email login codes (OTP) ----------------
+   Passwordless login: email a 6-digit code, verify it, then issue a JWT.
+   Needs SMTP configured (Admin → Payment/Bank) and `npm install nodemailer`. */
+function smtpCfg() {
+  const s = db.smtp || {};
+  return {
+    host: s.host || process.env.SMTP_HOST || "",
+    port: Number(s.port || process.env.SMTP_PORT || 587),
+    user: s.user || process.env.SMTP_USER || "",
+    pass: s.pass || process.env.SMTP_PASS || "",
+    from: s.from || s.user || process.env.SMTP_FROM || ""
+  };
+}
+function smtpReady() { const c = smtpCfg(); return !!(nodemailer && c.host && c.user && c.pass); }
+async function sendMail(to, subject, text) {
+  const c = smtpCfg();
+  const t = nodemailer.createTransport({ host: c.host, port: c.port, secure: c.port === 465, auth: { user: c.user, pass: c.pass } });
+  await t.sendMail({ from: c.from || c.user, to, subject, text });
+}
+const otpStore = {};
+app.get("/api/public/otp-available", (req, res) => res.json({ email: smtpReady() }));
+app.post("/api/public/otp/send", async (req, res) => {
+  const email = String((req.body && req.body.email) || "").trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email address" });
+  if (!smtpReady()) return res.status(400).json({ error: "Email login isn't set up yet." });
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  otpStore[email] = { code, expires: Date.now() + 10 * 60000, tries: 0, last: Date.now() };
+  try {
+    await sendMail(email, "Your Hotel Jai Laxmi login code", "Your login code is: " + code + "\n\nIt expires in 10 minutes. If you didn't request this, please ignore this email.\n\n— Hotel Jai Laxmi and Lodge");
+    console.log("[otp] code emailed to", email);
+    res.json({ ok: true });
+  } catch (e) { console.log("[otp] send failed"); res.status(502).json({ error: "Could not send the email — check the SMTP settings." }); }
+});
+app.post("/api/public/otp/verify", (req, res) => {
+  const email = String((req.body && req.body.email) || "").trim().toLowerCase();
+  const code = String((req.body && req.body.code) || "").trim();
+  const rec = otpStore[email];
+  if (!rec) return res.status(400).json({ error: "Please request a code first." });
+  if (Date.now() > rec.expires) { delete otpStore[email]; return res.status(400).json({ error: "That code expired — request a new one." }); }
+  if (rec.tries >= 5) { delete otpStore[email]; return res.status(429).json({ error: "Too many attempts — request a new code." }); }
+  rec.tries++;
+  if (code !== rec.code) return res.status(400).json({ error: "Wrong code — check and try again." });
+  delete otpStore[email];
+  let user = db.users.find(u => (u.email || "").toLowerCase() === email);
+  if (!user) {
+    user = { id: uid(), name: (req.body.name || email.split("@")[0]), email, phone: req.body.phone || "", age: null, photo: "", passwordHash: bcrypt.hashSync(uid() + Date.now(), 10), role: "customer", access: [], emailVerified: true, createdAt: new Date().toISOString() };
+    db.users.push(user); save();
+  } else { user.emailVerified = true; save(); }
+  res.json({ token: sign(user), user: publicUser(user) });
+});
+app.get("/api/smtp", auth("admin"), (req, res) => {
+  const s = db.smtp || {};
+  res.json({ host: s.host || "", port: s.port || 587, user: s.user || "", from: s.from || "", hasPass: !!s.pass });
+});
+app.put("/api/smtp", auth("admin"), (req, res) => {
+  db.smtp = db.smtp || {};
+  ["host", "user", "from"].forEach(k => { if (req.body[k] !== undefined) db.smtp[k] = String(req.body[k]).trim(); });
+  if (req.body.port !== undefined) db.smtp.port = Number(req.body.port) || 587;
+  if (req.body.pass) db.smtp.pass = String(req.body.pass); // only overwrite when a new one is given
+  save(); changed("smtp"); res.json({ ok: true, ready: smtpReady() });
+});
+
 /* ---------------- Google Sign-In (customers) ----------------
    The browser gets an ID token from Google Identity Services; we verify it
    server-side against Google's tokeninfo endpoint and check the audience

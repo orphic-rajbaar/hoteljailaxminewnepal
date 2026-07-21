@@ -1005,6 +1005,44 @@ function PaymentTab() {
       </div>
 
       <GoogleAuthCard />
+      <SmtpCard />
+    </div>
+  );
+}
+
+/* Email (SMTP) — powers "email me a login code" and notifications */
+function SmtpCard() {
+  const [s, setS] = useState(null);
+  const [pass, setPass] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { api("/smtp").then(setS).catch(() => setS({})); }, []);
+  if (!s) return null;
+  const ready = s.host && s.user && s.hasPass;
+  const save = async () => {
+    setErr("");
+    try { await api("/smtp", { method: "PUT", body: { host: s.host, port: s.port, user: s.user, from: s.from, pass } }); setSaved(true); setPass(""); setTimeout(() => setSaved(false), 2500); }
+    catch (e) { setErr(e.message); }
+  };
+  return (
+    <div className="card" style={{ marginTop: 18 }}>
+      <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
+        <h4 className="gold" style={{ margin: 0 }}>📧 Email — login codes &amp; notifications</h4>
+        <span className={"pill " + (ready ? "p-ready" : "p-cancelled")}>{ready ? "Configured" : "Not set"}</span>
+      </div>
+      <p className="muted" style={{ marginTop: -4 }}>Enables “Email me a login code” for customers. For Gmail: host <b>smtp.gmail.com</b>, port <b>587</b>, your Gmail as the username, and a Google <b>App Password</b> (Google account → Security → App passwords — not your normal password). Run <b>npm install nodemailer</b> on the server once.</p>
+      <div className="row">
+        <div><label>SMTP host</label><input value={s.host || ""} onChange={e => setS({ ...s, host: e.target.value })} placeholder="smtp.gmail.com" /></div>
+        <div><label>Port</label><input type="number" value={s.port || 587} onChange={e => setS({ ...s, port: e.target.value })} /></div>
+      </div>
+      <label>Username (email)</label>
+      <input value={s.user || ""} onChange={e => setS({ ...s, user: e.target.value })} placeholder="you@gmail.com" />
+      <label>App password {s.hasPass ? "(leave blank to keep the saved one)" : ""}</label>
+      <input type="password" value={pass} onChange={e => setPass(e.target.value)} placeholder={s.hasPass ? "•••••• saved" : "16-char app password"} />
+      <label>From (optional)</label>
+      <input value={s.from || ""} onChange={e => setS({ ...s, from: e.target.value })} placeholder="Hotel Jai Laxmi <you@gmail.com>" />
+      {err && <p className="red mt">⚠ {err}</p>}
+      <button className="btn mt" onClick={save}>{saved ? "✓ Saved!" : "Save Email Settings"}</button>
     </div>
   );
 }

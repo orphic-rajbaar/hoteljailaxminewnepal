@@ -2640,6 +2640,8 @@ function GoogleLoginBtn({ onDone, setErr }) {
       if (!window.google || !window.google.accounts || !ref.current) return;
       window.google.accounts.id.initialize({
         client_id: cfg.clientId,
+        ux_mode: "popup",
+        use_fedcm_for_prompt: true, // works on mobile even with 3rd-party cookies blocked
         callback: async resp => {
           try {
             const r = await api("/public/google-login", { method: "POST", body: { credential: resp.credential } });
@@ -2649,7 +2651,9 @@ function GoogleLoginBtn({ onDone, setErr }) {
           } catch (e) { if (setErr) setErr(e.message); }
         }
       });
-      window.google.accounts.id.renderButton(ref.current, { theme: "outline", size: "large", shape: "pill", width: 280 });
+      /* responsive width so the button renders on small phones (max 400) */
+      const w = Math.max(200, Math.min(360, (ref.current && ref.current.offsetWidth) || 300));
+      window.google.accounts.id.renderButton(ref.current, { theme: "outline", size: "large", shape: "pill", text: "continue_with", logo_alignment: "center", width: w });
     };
     if (window.google && window.google.accounts) init();
     else {
@@ -2663,6 +2667,47 @@ function GoogleLoginBtn({ onDone, setErr }) {
     <div>
       <div ref={ref} style={{ display: "flex", justifyContent: "center", margin: "10px 0 4px" }} />
       <p className="muted" style={{ fontSize: 11.5, textAlign: "center" }}>— or use email below —</p>
+    </div>
+  );
+}
+
+/* passwordless login: email a 6-digit code (only shows if SMTP is configured) */
+function OtpLogin({ onDone, setErr }) {
+  const [avail, setAvail] = useState(false);
+  const [step, setStep] = useState(0);
+  const [email, setEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api("/public/otp-available").then(r => setAvail(!!r.email)).catch(() => { }); }, []);
+  if (!avail) return null;
+  const err = m => setErr && setErr(m);
+  const send = async () => {
+    err(""); if (!email.trim()) return; setBusy(true);
+    try { await api("/public/otp/send", { method: "POST", body: { email } }); setStep(2); } catch (e) { err(e.message); }
+    setBusy(false);
+  };
+  const verify = async () => {
+    err(""); setBusy(true);
+    try { const r = await api("/public/otp/verify", { method: "POST", body: { email, code } }); Auth.set(r.token, r.user); window.dispatchEvent(new Event("auth-changed")); if (onDone) onDone(); }
+    catch (e) { err(e.message); }
+    setBusy(false);
+  };
+  if (step === 0) return <button type="button" className="btn ghost" style={{ width: "100%", marginBottom: 8 }} onClick={() => setStep(1)}>📧 Email me a login code (no password)</button>;
+  return (
+    <div className="mb">
+      {step === 1 && <React.Fragment>
+        <label style={{ textAlign: "left" }}>Email for the login code</label>
+        <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@email.com" />
+        <button type="button" className="btn mt" style={{ width: "100%" }} disabled={busy} onClick={send}>{busy ? "Sending…" : "Send code"}</button>
+      </React.Fragment>}
+      {step === 2 && <React.Fragment>
+        <label style={{ textAlign: "left" }}>Enter the 6-digit code sent to {email}</label>
+        <input value={code} onChange={e => setCode(e.target.value)} placeholder="123456" inputMode="numeric" maxLength={6} />
+        <div className="flex mt">
+          <button type="button" className="btn" style={{ flex: 1 }} disabled={busy} onClick={verify}>{busy ? "Verifying…" : "Verify & Log In"}</button>
+          <button type="button" className="btn ghost" onClick={() => { setStep(1); setCode(""); }}>← Back</button>
+        </div>
+      </React.Fragment>}
     </div>
   );
 }
@@ -2723,6 +2768,7 @@ function AccountPage() {
           <button type="button" className={"chip" + (tab === "signup" ? " on" : "")} onClick={() => { setTab("signup"); setErr(""); }}>Sign Up</button>
         </div>
         <GoogleLoginBtn onDone={() => go("/account")} setErr={setErr} />
+        <OtpLogin onDone={() => go("/account")} setErr={setErr} />
         {tab === "signup" && <>
           <div className="flex" style={{ justifyContent: "center", alignItems: "center", gap: 12, margin: "4px 0 8px" }}>
             {f.photo && <img src={f.photo} alt="profile" style={{ width: 56, height: 56, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--gold-dim)" }} />}
