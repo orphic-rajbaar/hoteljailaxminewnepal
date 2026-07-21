@@ -1,0 +1,12 @@
+# Don't copy these into Docker image
+node_modules/
+npm-debug.log*
+.env
+.env.local
+.git/
+.gitignore
+*.md
+backups/
+db.json
+Thumbs.db
+.DS_Store
