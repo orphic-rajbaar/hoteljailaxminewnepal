@@ -237,7 +237,8 @@ function POS() {
 
   return (
     <div>
-      <PageHead t="POS Billing" s="Offline counter orders — sent to kitchen instantly" />
+      <PageHead t="POS Billing" s="Offline counter orders — sent to kitchen instantly"
+        right={<a className="btn sm ghost" href="/drivers/thermal-printer-driver.exe" download="thermal-printer-driver.exe" title="Windows 58/80mm thermal printer driver — install on the PC">🧰 Printer driver</a>} />
       <div className="pos">
         <div className="grid c4">
           {avail.map(m => (

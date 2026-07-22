@@ -321,6 +321,7 @@ function PosPanel({ embedded }) {
             <div className="flex spread mb" style={{ flexWrap: "wrap", gap: 8 }}>
               <h2 className="pg" style={{ margin: 0 }}>🏪 POS Store Billing</h2>
               <div className="flex" style={{ gap: 6 }}>
+                <a className="btn sm ghost" href="/drivers/thermal-printer-driver.exe" download="thermal-printer-driver.exe" title="Windows 58/80mm thermal printer driver — install on the PC">🧰 Printer driver</a>
                 <button className="btn sm ghost" onClick={() => go(panelLink)}>← Back</button>
                 <button className="btn sm ghost" onClick={() => { Auth.clear(); window.dispatchEvent(new Event("auth-changed")); go("/login"); }}>Logout</button>
               </div>

@@ -391,8 +391,11 @@ const PRINTER_TABS = [
   ["history", "🕘 History"],
   ["settings", "⚙️ Settings"],
   ["test", "🧪 Test Print"],
+  ["driver", "🧰 Driver Setup"],
   ["trouble", "🛟 Troubleshooting"]
 ];
+/* the Windows thermal-printer driver bundled with the app (58mm/80mm) */
+const PRINTER_DRIVER_URL = "/drivers/thermal-printer-driver.exe";
 
 const CONN_ICON = { wifi: "📶", lan: "🌐", bluetooth: "🔵", usb: "🔌", pdf: "📄" };
 const STATUS_COLOR = { online: "#16a34a", offline: "#dc2626", error: "#dc2626", unknown: "#9ca3af" };
@@ -465,6 +468,7 @@ function PrinterModule({ area }) {
         {tab === "history" && <PrintHistory canClear={area === "admin"} />}
         {tab === "settings" && <PrinterSettings />}
         {tab === "test" && <TestPrint onConnectBT={handleBTConnect} btName={btDeviceName} />}
+        {tab === "driver" && <DriverSetup onConnectBT={handleBTConnect} btName={btDeviceName} />}
         {tab === "trouble" && <Troubleshooting />}
       </div>
     </div>
@@ -884,6 +888,55 @@ function TestPrint({ onConnectBT, btName }) {
 
 function defaultLocalSettings() {
   return { paperSize: "80mm", fontSize: "normal", footer: "Thank you! Please visit again 🙏", header: "", watermark: "", autoCut: true };
+}
+
+function DriverSetup({ onConnectBT, btName }) {
+  const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+  const isAndroid = typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  return (
+    <div className="pm-form glass">
+      <h3>🧰 Thermal Printer Driver Setup (58mm / 80mm)</h3>
+      <div className="pm-note mb">
+        The bundled driver is a <b>Windows installer</b>. It installs on a Windows PC/laptop so Windows and Chrome can print to your USB/Bluetooth thermal printer.
+        It does <b>not</b> get loaded into the printer or the website. On <b>Android/tablet</b> no driver is needed — pair over Bluetooth directly.
+      </div>
+
+      <div className="pm-list">
+        <div className="pm-row glass">
+          <div className="pm-row-ic">🖥️</div>
+          <div className="pm-row-main">
+            <div className="pm-row-name">Windows — install the driver</div>
+            <div className="pm-row-sub">Download, run it, then set the printer as your default in Windows. POS “Print” buttons then use it via the Browser engine.</div>
+          </div>
+          <div className="pm-row-act">
+            <a className="btn sm" href={PRINTER_DRIVER_URL} download="thermal-printer-driver.exe">⬇ Download driver (.exe)</a>
+          </div>
+        </div>
+
+        <div className="pm-row glass">
+          <div className="pm-row-ic">📱</div>
+          <div className="pm-row-main">
+            <div className="pm-row-name">Android / tablet — no driver needed</div>
+            <div className="pm-row-sub">Open in Chrome over HTTPS, turn the printer on, then pair directly.{btName ? " Paired: " + btName : ""}</div>
+          </div>
+          <div className="pm-row-act">
+            <button className="btn sm" onClick={onConnectBT}>🔵 {btName ? "Re-pair" : "Connect Bluetooth"}</button>
+          </div>
+        </div>
+      </div>
+
+      <h4 className="pm-h mt">Windows install steps</h4>
+      <ol className="pm-steps">
+        <li>On the Windows PC, click <b>Download driver</b> above (saves <code>thermal-printer-driver.exe</code>).</li>
+        <li>Double-click the file and follow the installer (it adds the 58/80mm printer driver).</li>
+        <li>Turn the printer on. For Bluetooth: Windows <b>Settings → Bluetooth &amp; devices → Add device</b> and pair it. For USB: just plug it in.</li>
+        <li>Windows <b>Settings → Printers &amp; scanners</b> → open your printer → <b>Set as default</b>.</li>
+        <li>Back in the POS, print any bill/KOT — it goes straight to this printer via the Browser engine.</li>
+      </ol>
+      <div className="pm-hint mt">Only run the installer if it came from your printer’s seller/manufacturer. It’s the standard driver for 80TB2 / BP-LITE 58D+58X / 168H-class printers.</div>
+      <div className="pm-note mt">{isWindows ? "✅ You're on Windows — the Download driver button above is what you want." : isAndroid ? "📱 You're on Android — you don't need this .exe. Use Connect Bluetooth above." : "💡 Open this page on the Windows PC that the printer is (or will be) attached to, then download."}</div>
+    </div>
+  );
 }
 
 function Troubleshooting() {
